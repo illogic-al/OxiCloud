@@ -12,7 +12,7 @@ use tracing::info;
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::{FolderDto, MoveFolderDto};
 use crate::application::ports::file_ports::{FileManagementUseCase, FileRetrievalUseCase};
-use crate::application::ports::inbound::FolderUseCase;
+use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::storage_ports::CopyFolderTreeResult;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::application::services::file_management_service::FileManagementService;
@@ -145,7 +145,7 @@ impl BatchOperationService {
 
             async move {
                 let copy_result = mgmt
-                    .copy_file_owned(&file_id, user_id, target_folder.map(|s| s.to_string()))
+                    .copy_file_with_perms(&file_id, user_id, target_folder.map(|s| s.to_string()))
                     .await;
                 (file_id, copy_result)
             }
@@ -211,7 +211,7 @@ impl BatchOperationService {
 
             async move {
                 let move_result = mgmt
-                    .move_file_owned(&file_id, user_id, target_folder.map(|s| s.to_string()))
+                    .move_file_with_perms(&file_id, user_id, target_folder.map(|s| s.to_string()))
                     .await;
                 (file_id, move_result)
             }
@@ -270,7 +270,7 @@ impl BatchOperationService {
             let mgmt = self.file_management.clone();
 
             async move {
-                let delete_result = mgmt.delete_file_owned(&file_id, user_id).await;
+                let delete_result = mgmt.delete_file_with_perms(&file_id, user_id).await;
                 let id_for_result = file_id.clone();
                 (file_id, delete_result.map(|_| id_for_result))
             }
@@ -390,7 +390,9 @@ impl BatchOperationService {
             let folder_service = self.folder_service.clone();
 
             async move {
-                let delete_result = folder_service.delete_folder(&folder_id, user_id).await;
+                let delete_result = folder_service
+                    .delete_folder_with_perms(&folder_id, user_id)
+                    .await;
                 let id_for_result = folder_id.clone();
                 (folder_id, delete_result.map(|_| id_for_result))
             }
@@ -583,7 +585,9 @@ impl BatchOperationService {
                 let dto = MoveFolderDto {
                     parent_id: target.map(|s| s.to_string()),
                 };
-                let move_result = folder_service.move_folder(&folder_id, dto, user_id).await;
+                let move_result = folder_service
+                    .move_folder_with_perms(&folder_id, dto, user_id)
+                    .await;
                 (folder_id, move_result)
             }
         }))
@@ -644,7 +648,7 @@ impl BatchOperationService {
 
             async move {
                 let copy_result = file_management
-                    .copy_folder_tree_owned(
+                    .copy_folder_tree_with_perms(
                         &folder_id,
                         user_id,
                         target.map(|s| s.to_string()),
@@ -732,7 +736,7 @@ impl BatchOperationService {
         for folder_id in &folder_ids {
             match self
                 .folder_service
-                .get_folder_owned(folder_id, user_id)
+                .get_folder_with_perms(folder_id, user_id)
                 .await
             {
                 Ok(root_folder) => {
@@ -979,7 +983,7 @@ impl BatchOperationService {
                     name: name.clone(),
                     parent_id: parent_id.clone(),
                 };
-                let create_result = folder_service.create_folder(dto, user_id).await;
+                let create_result = folder_service.create_folder_with_perms(dto, user_id).await;
                 let id = format!("{}:{}", name, parent_id.unwrap_or_default());
                 (id, create_result)
             }
@@ -1039,7 +1043,9 @@ impl BatchOperationService {
             let folder_service = self.folder_service.clone();
 
             async move {
-                let get_result = folder_service.get_folder_owned(&folder_id, user_id).await;
+                let get_result = folder_service
+                    .get_folder_with_perms(&folder_id, user_id)
+                    .await;
                 (folder_id, get_result)
             }
         }))

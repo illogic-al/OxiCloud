@@ -117,10 +117,10 @@ impl FileHandler {
 
                 // ── SECURITY: Verify folder ownership before upload (IDOR V-03 fix) ──
                 if let Some(ref fid) = folder_id {
-                    use crate::application::ports::inbound::FolderUseCase;
+                    use crate::application::ports::folder_ports::FolderUseCase;
                     let folder_service = &state.applications.folder_service;
                     if folder_service
-                        .get_folder_owned(fid, auth_user.id)
+                        .get_folder_with_perms(fid, auth_user.id)
                         .await
                         .is_err()
                     {
@@ -875,7 +875,7 @@ impl FileHandler {
 
         // Auth required: trash-first with dedup cleanup + ownership verification
         let result = mgmt
-            .delete_with_cleanup(&id, auth_user.id)
+            .delete_and_cleanup_with_perms(&id, auth_user.id)
             .await
             .map(|was_trashed| {
                 if was_trashed {
@@ -917,7 +917,10 @@ impl FileHandler {
 
         tracing::info!("Renaming file {} to \"{}\"", id, new_name);
         let mgmt = &state.applications.file_management_service;
-        match mgmt.rename_file_owned(&id, auth_user.id, &new_name).await {
+        match mgmt
+            .rename_file_with_perms(&id, auth_user.id, &new_name)
+            .await
+        {
             Ok(file_dto) => (StatusCode::OK, Json(file_dto)).into_response(),
             Err(err) => AppError::from(err).into_response(),
         }
@@ -935,7 +938,7 @@ impl FileHandler {
         let mgmt = &state.applications.file_management_service;
 
         match mgmt
-            .move_file_owned(&id, auth_user.id, payload.folder_id)
+            .move_file_with_perms(&id, auth_user.id, payload.folder_id)
             .await
         {
             Ok(file) => (StatusCode::OK, Json(file)).into_response(),
@@ -956,7 +959,10 @@ impl FileHandler {
             .map(|s| s.to_string());
 
         let mgmt = &state.applications.file_management_service;
-        match mgmt.move_file_owned(&id, auth_user.id, folder_id).await {
+        match mgmt
+            .move_file_with_perms(&id, auth_user.id, folder_id)
+            .await
+        {
             Ok(file_dto) => (StatusCode::OK, Json(file_dto)).into_response(),
             Err(err) => AppError::from(err).into_response(),
         }

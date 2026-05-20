@@ -16,7 +16,7 @@ use crate::application::dtos::folder_dto::{
 use crate::application::dtos::folder_listing_dto::FolderListingDto;
 use crate::application::dtos::pagination::PaginationRequestDto;
 use crate::application::ports::file_ports::FileRetrievalUseCase;
-use crate::application::ports::inbound::FolderUseCase;
+use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::application::services::folder_service::FolderService;
 use crate::common::di::AppState as GlobalAppState;
@@ -76,7 +76,7 @@ impl FolderHandler {
             }
         }
 
-        match service.create_folder(dto, auth_user.id).await {
+        match service.create_folder_with_perms(dto, auth_user.id).await {
             Ok(folder) => (StatusCode::CREATED, Json(folder)).into_response(),
             Err(err) => AppError::from(err).into_response(),
         }
@@ -244,7 +244,10 @@ impl FolderHandler {
         Path(id): Path<String>,
         Json(dto): Json<RenameFolderDto>,
     ) -> impl IntoResponse {
-        match service.rename_folder(&id, dto, auth_user.id).await {
+        match service
+            .rename_folder_with_perms(&id, dto, auth_user.id)
+            .await
+        {
             Ok(folder) => (StatusCode::OK, Json(folder)).into_response(),
             Err(err) => AppError::from(err).into_response(),
         }
@@ -257,7 +260,7 @@ impl FolderHandler {
         Path(id): Path<String>,
         Json(dto): Json<MoveFolderDto>,
     ) -> impl IntoResponse {
-        match service.move_folder(&id, dto, auth_user.id).await {
+        match service.move_folder_with_perms(&id, dto, auth_user.id).await {
             Ok(folder) => (StatusCode::OK, Json(folder)).into_response(),
             Err(err) => AppError::from(err).into_response(),
         }
@@ -269,7 +272,7 @@ impl FolderHandler {
         auth_user: AuthUser,
         Path(id): Path<String>,
     ) -> impl IntoResponse {
-        match service.delete_folder(&id, auth_user.id).await {
+        match service.delete_folder_with_perms(&id, auth_user.id).await {
             Ok(_) => StatusCode::NO_CONTENT.into_response(),
             Err(err) => AppError::from(err).into_response(),
         }
@@ -304,7 +307,7 @@ impl FolderHandler {
 
         // Fallback to permanent delete if trash is unavailable or failed
         let folder_service = &state.applications.folder_service;
-        match folder_service.delete_folder(&id, user_id).await {
+        match folder_service.delete_folder_with_perms(&id, user_id).await {
             Ok(_) => {
                 tracing::info!("Folder permanently deleted: {}", id);
                 StatusCode::NO_CONTENT.into_response()

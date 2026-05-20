@@ -1,7 +1,7 @@
 use crate::application::dtos::folder_dto::{
     CreateFolderDto, FolderDto, MoveFolderDto, RenameFolderDto,
 };
-use crate::application::ports::inbound::FolderUseCase;
+use crate::application::ports::folder_ports::FolderUseCase;
 use crate::common::errors::{DomainError, ErrorKind};
 use crate::domain::repositories::folder_repository::FolderRepository;
 use crate::domain::services::path_service::{StoragePath, validate_storage_name};
@@ -25,7 +25,7 @@ impl FolderService {
         struct FolderServiceStub;
 
         impl FolderUseCase for FolderServiceStub {
-            async fn create_folder(
+            async fn create_folder_with_perms(
                 &self,
                 _dto: CreateFolderDto,
                 _user_id: Uuid,
@@ -37,7 +37,7 @@ impl FolderService {
                 Ok(FolderDto::empty())
             }
 
-            async fn get_folder_owned(
+            async fn get_folder_with_perms(
                 &self,
                 _id: &str,
                 _caller_id: Uuid,
@@ -101,7 +101,7 @@ impl FolderService {
                 )
             }
 
-            async fn rename_folder(
+            async fn rename_folder_with_perms(
                 &self,
                 _id: &str,
                 _dto: RenameFolderDto,
@@ -110,7 +110,7 @@ impl FolderService {
                 Ok(FolderDto::empty())
             }
 
-            async fn move_folder(
+            async fn move_folder_with_perms(
                 &self,
                 _id: &str,
                 _dto: MoveFolderDto,
@@ -119,7 +119,11 @@ impl FolderService {
                 Ok(FolderDto::empty())
             }
 
-            async fn delete_folder(&self, _id: &str, _caller_id: Uuid) -> Result<(), DomainError> {
+            async fn delete_folder_with_perms(
+                &self,
+                _id: &str,
+                _caller_id: Uuid,
+            ) -> Result<(), DomainError> {
                 Ok(())
             }
 
@@ -138,7 +142,7 @@ impl FolderService {
 
 impl FolderUseCase for FolderService {
     /// Creates a new folder
-    async fn create_folder(
+    async fn create_folder_with_perms(
         &self,
         dto: CreateFolderDto,
         caller_id: Uuid,
@@ -204,7 +208,11 @@ impl FolderUseCase for FolderService {
     }
 
     /// Gets a folder by its ID, enforcing that `caller_id` is the owner.
-    async fn get_folder_owned(&self, id: &str, caller_id: Uuid) -> Result<FolderDto, DomainError> {
+    async fn get_folder_with_perms(
+        &self,
+        id: &str,
+        caller_id: Uuid,
+    ) -> Result<FolderDto, DomainError> {
         let folder_dto = self.get_folder(id).await?;
         if folder_dto.owner_id.as_deref() != Some(&caller_id.to_string()) {
             tracing::warn!(
@@ -261,10 +269,6 @@ impl FolderUseCase for FolderService {
         parent_id: Option<&str>,
         owner_id: Uuid,
     ) -> Result<Vec<FolderDto>, DomainError> {
-        let owner_id_short = {
-            let s = owner_id.to_string();
-            s[..8.min(s.len())].to_string()
-        };
         let folders = self
             .folder_storage
             .list_folders_by_owner(parent_id, owner_id)
@@ -286,6 +290,10 @@ impl FolderUseCase for FolderService {
                 "No root folders found for user {}, creating home folder automatically",
                 owner_id
             );
+            let owner_id_short = {
+                let s = owner_id.to_string();
+                s[..8.min(s.len())].to_string()
+            };
             let folder_name = format!("My Folder - {}", owner_id_short);
             match self
                 .folder_storage
@@ -388,7 +396,7 @@ impl FolderUseCase for FolderService {
     }
 
     /// Renames a folder after verifying ownership.
-    async fn rename_folder(
+    async fn rename_folder_with_perms(
         &self,
         id: &str,
         dto: RenameFolderDto,
@@ -431,7 +439,7 @@ impl FolderUseCase for FolderService {
     }
 
     /// Moves a folder to a new parent after verifying ownership.
-    async fn move_folder(
+    async fn move_folder_with_perms(
         &self,
         id: &str,
         dto: MoveFolderDto,
@@ -497,7 +505,7 @@ impl FolderUseCase for FolderService {
     }
 
     /// Deletes a folder after verifying ownership.
-    async fn delete_folder(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
+    async fn delete_folder_with_perms(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
         // Verify the folder exists and belongs to the caller
         let folder = self.folder_storage.get_folder(id).await?;
 

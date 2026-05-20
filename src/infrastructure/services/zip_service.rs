@@ -3,7 +3,7 @@ use crate::application::services::folder_service::FolderService;
 use crate::{
     application::dtos::file_dto::FileDto,
     application::ports::file_ports::FileRetrievalUseCase,
-    application::ports::inbound::FolderUseCase,
+    application::ports::folder_ports::FolderUseCase,
     application::ports::zip_ports::ZipPort,
     common::errors::{DomainError, ErrorKind, Result},
 };

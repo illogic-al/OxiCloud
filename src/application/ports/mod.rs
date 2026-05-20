@@ -10,6 +10,7 @@ pub mod dedup_ports;
 pub mod favorites_ports;
 pub mod file_lifecycle;
 pub mod file_ports;
+pub mod folder_ports;
 pub mod inbound;
 pub mod music_ports;
 pub mod outbound;

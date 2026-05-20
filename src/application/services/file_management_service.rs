@@ -103,9 +103,8 @@ impl FileManagementService {
         };
         folder_repo.verify_owner(target, caller_id).await
     }
-}
 
-impl FileManagementUseCase for FileManagementService {
+    //impl FileManagementPrivateUseCase for FileManagementService {
     async fn move_file(
         &self,
         file_id: &str,
@@ -133,20 +132,6 @@ impl FileManagementUseCase for FileManagementService {
         );
 
         Ok(FileDto::from(moved_file))
-    }
-
-    async fn move_file_owned(
-        &self,
-        file_id: &str,
-        caller_id: Uuid,
-        folder_id: Option<String>,
-    ) -> Result<FileDto, DomainError> {
-        // Verify file ownership first
-        self.verify_owner(file_id, caller_id).await?;
-        // Verify target folder ownership (prevents file from "disappearing")
-        self.verify_target_folder_owner(folder_id.as_deref(), caller_id)
-            .await?;
-        self.move_file(file_id, folder_id).await
     }
 
     async fn copy_file(
@@ -178,18 +163,6 @@ impl FileManagementUseCase for FileManagementService {
         Ok(FileDto::from(copied_file))
     }
 
-    async fn copy_file_owned(
-        &self,
-        file_id: &str,
-        caller_id: Uuid,
-        target_folder_id: Option<String>,
-    ) -> Result<FileDto, DomainError> {
-        self.verify_owner(file_id, caller_id).await?;
-        self.verify_target_folder_owner(target_folder_id.as_deref(), caller_id)
-            .await?;
-        self.copy_file(file_id, target_folder_id).await
-    }
-
     async fn rename_file(&self, file_id: &str, new_name: &str) -> Result<FileDto, DomainError> {
         if let Err(reason) = validate_storage_name(new_name) {
             return Err(DomainError::validation_error(format!(
@@ -217,65 +190,7 @@ impl FileManagementUseCase for FileManagementService {
         Ok(FileDto::from(renamed_file))
     }
 
-    async fn rename_file_owned(
-        &self,
-        file_id: &str,
-        caller_id: Uuid,
-        new_name: &str,
-    ) -> Result<FileDto, DomainError> {
-        self.verify_owner(file_id, caller_id).await?;
-        self.rename_file(file_id, new_name).await
-    }
-
     async fn delete_file(&self, id: &str) -> Result<(), DomainError> {
-        self.file_repository.delete_file(id).await?;
-        if let Some(cc) = &self.content_cache {
-            cc.invalidate(id).await;
-        }
-        for hook in &self.file_deleted_hooks {
-            hook.on_file_deleted(id).await;
-        }
-        Ok(())
-    }
-
-    async fn delete_file_owned(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
-        self.verify_owner(id, caller_id).await?;
-        self.delete_file(id).await
-    }
-
-    /// Smart delete: trash-first with dedup reference cleanup.
-    ///
-    /// Blob ref_count bookkeeping is handled entirely by the PG trigger
-    /// `trg_files_decrement_blob_ref` which fires on DELETE FROM storage.files.
-    /// We do NOT decrement here — trashing is a soft-delete (UPDATE, not DELETE)
-    /// so the blob must remain referenced until the file is permanently deleted.
-    async fn delete_with_cleanup(&self, id: &str, user_id: Uuid) -> Result<bool, DomainError> {
-        // Step 1: Try trash (soft delete — file row stays, blob stays referenced)
-        if let Some(trash) = &self.trash_service {
-            info!("Moving file to trash: {}", id);
-            match trash.move_to_trash(id, "file", user_id).await {
-                Ok(_) => {
-                    info!("File successfully moved to trash: {}", id);
-                    // Invalidate content cache — trashed files must not be served.
-                    if let Some(cc) = &self.content_cache {
-                        cc.invalidate(id).await;
-                    }
-                    // Do NOT decrement blob ref here — the file row still exists
-                    // (is_trashed = TRUE). The trigger will decrement when the
-                    // row is actually DELETEd during trash emptying.
-                    return Ok(true); // trashed
-                }
-                Err(err) => {
-                    error!("Could not move file to trash: {:?}", err);
-                    warn!("Falling back to permanent delete");
-                    // fall through
-                }
-            }
-        } else {
-            warn!("Trash service not available, using permanent delete");
-        }
-
-        // Step 2: Permanent delete — trigger handles blob ref_count
         warn!("Permanently deleting file: {}", id);
         self.file_repository.delete_file(id).await?;
         if let Some(cc) = &self.content_cache {
@@ -285,8 +200,7 @@ impl FileManagementUseCase for FileManagementService {
             hook.on_file_deleted(id).await;
         }
         info!("File permanently deleted: {}", id);
-
-        Ok(false) // permanently deleted
+        Ok(())
     }
 
     async fn copy_folder_tree(
@@ -319,8 +233,95 @@ impl FileManagementUseCase for FileManagementService {
 
         Ok(result)
     }
+}
 
-    async fn copy_folder_tree_owned(
+impl FileManagementUseCase for FileManagementService {
+    async fn move_file_with_perms(
+        &self,
+        file_id: &str,
+        caller_id: Uuid,
+        folder_id: Option<String>,
+    ) -> Result<FileDto, DomainError> {
+        // Verify file ownership first
+        self.verify_owner(file_id, caller_id).await?;
+        // Verify target folder ownership (prevents file from "disappearing")
+        self.verify_target_folder_owner(folder_id.as_deref(), caller_id)
+            .await?;
+        self.move_file(file_id, folder_id).await
+    }
+
+    async fn copy_file_with_perms(
+        &self,
+        file_id: &str,
+        caller_id: Uuid,
+        target_folder_id: Option<String>,
+    ) -> Result<FileDto, DomainError> {
+        self.verify_owner(file_id, caller_id).await?;
+        self.verify_target_folder_owner(target_folder_id.as_deref(), caller_id)
+            .await?;
+        self.copy_file(file_id, target_folder_id).await
+    }
+
+    async fn rename_file_with_perms(
+        &self,
+        file_id: &str,
+        caller_id: Uuid,
+        new_name: &str,
+    ) -> Result<FileDto, DomainError> {
+        self.verify_owner(file_id, caller_id).await?;
+        self.rename_file(file_id, new_name).await
+    }
+
+    async fn delete_file_with_perms(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
+        self.verify_owner(id, caller_id).await?;
+        self.delete_file(id).await
+    }
+
+    /// Smart delete: trash-first with dedup reference cleanup.
+    ///
+    /// Blob ref_count bookkeeping is handled entirely by the PG trigger
+    /// `trg_files_decrement_blob_ref` which fires on DELETE FROM storage.files.
+    /// We do NOT decrement here — trashing is a soft-delete (UPDATE, not DELETE)
+    /// so the blob must remain referenced until the file is permanently deleted.
+    async fn delete_and_cleanup_with_perms(
+        &self,
+        id: &str,
+        caller_id: Uuid,
+    ) -> Result<bool, DomainError> {
+        self.verify_owner(id, caller_id).await?;
+        // Step 1: Try trash (soft delete — file row stays, blob stays referenced)
+        if let Some(trash) = &self.trash_service {
+            info!("Moving file to trash: {}", id);
+            match trash.move_to_trash(id, "file", caller_id).await {
+                Ok(_) => {
+                    info!("File successfully moved to trash: {}", id);
+                    // Invalidate content cache — trashed files must not be served.
+                    if let Some(cc) = &self.content_cache {
+                        cc.invalidate(id).await;
+                    }
+                    // Do NOT decrement blob ref here — the file row still exists
+                    // (is_trashed = TRUE). The trigger will decrement when the
+                    // row is actually DELETEd during trash emptying.
+                    return Ok(true); // trashed
+                }
+                Err(err) => {
+                    error!("Could not move file to trash: {:?}", err);
+                    warn!("Falling back to permanent delete");
+                    // fall through
+                }
+            }
+        } else {
+            warn!("Trash service not available, using permanent delete");
+        }
+
+        // Step 2: Permanent delete — trigger handles blob ref_count
+
+        self.delete_file(id).await?;
+
+        Ok(false) // permanently deleted
+    }
+
+    async fn copy_folder_tree_with_perms(
         &self,
         source_folder_id: &str,
         caller_id: Uuid,

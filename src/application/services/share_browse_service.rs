@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::application::dtos::folder_listing_dto::FolderListingDto;
 use crate::application::ports::file_ports::FileRetrievalUseCase;
-use crate::application::ports::inbound::FolderUseCase;
+use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::services::file_retrieval_service::FileRetrievalService;
 use crate::application::services::folder_service::FolderService;
 use crate::application::services::share_service::ShareService;

@@ -5,7 +5,7 @@ use crate::application::ports::auth_ports::{
     OidcIdClaims, OidcServicePort, PasswordHasherPort, SessionStoragePort, TokenServicePort,
     UserStoragePort,
 };
-use crate::application::ports::inbound::FolderUseCase;
+use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::services::folder_service::FolderService;
 use crate::common::config::OidcConfig;
 use crate::common::errors::{DomainError, ErrorKind};

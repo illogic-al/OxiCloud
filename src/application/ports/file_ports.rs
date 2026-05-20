@@ -254,58 +254,34 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
     }
 }
 
-// ─────────────────────────────────────────────────────
-// Management port (delete, move)
-// ─────────────────────────────────────────────────────
-
 /// Primary port for file management operations
 pub trait FileManagementUseCase: Send + Sync + 'static {
-    /// Moves a file to another folder (system/internal — no ownership check).
-    async fn move_file(
-        &self,
-        file_id: &str,
-        folder_id: Option<String>,
-    ) -> Result<FileDto, DomainError>;
-
     /// Moves a file, enforcing that `caller_id` is the owner.
-    async fn move_file_owned(
+    async fn move_file_with_perms(
         &self,
         file_id: &str,
         caller_id: Uuid,
         folder_id: Option<String>,
-    ) -> Result<FileDto, DomainError>;
-
-    /// Copies a file to another folder (zero-copy with dedup).
-    async fn copy_file(
-        &self,
-        file_id: &str,
-        target_folder_id: Option<String>,
     ) -> Result<FileDto, DomainError>;
 
     /// Copies a file, enforcing that `caller_id` is the owner.
-    async fn copy_file_owned(
+    async fn copy_file_with_perms(
         &self,
         file_id: &str,
         caller_id: Uuid,
         target_folder_id: Option<String>,
     ) -> Result<FileDto, DomainError>;
 
-    /// Renames a file (system/internal — no ownership check).
-    async fn rename_file(&self, file_id: &str, new_name: &str) -> Result<FileDto, DomainError>;
-
     /// Renames a file, enforcing that `caller_id` is the owner.
-    async fn rename_file_owned(
+    async fn rename_file_with_perms(
         &self,
         file_id: &str,
         caller_id: Uuid,
         new_name: &str,
     ) -> Result<FileDto, DomainError>;
 
-    /// Deletes a file (system/internal — no ownership check).
-    async fn delete_file(&self, id: &str) -> Result<(), DomainError>;
-
     /// Deletes a file, enforcing that `caller_id` is the owner.
-    async fn delete_file_owned(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError>;
+    async fn delete_file_with_perms(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError>;
 
     /// Smart delete: trash-first with dedup reference cleanup.
     ///
@@ -314,30 +290,22 @@ pub trait FileManagementUseCase: Send + Sync + 'static {
     /// 3. Decrements the dedup reference count for the content hash.
     ///
     /// Returns `Ok(true)` when trashed, `Ok(false)` when permanently deleted.
-    async fn delete_with_cleanup(&self, id: &str, user_id: Uuid) -> Result<bool, DomainError>;
+    async fn delete_and_cleanup_with_perms(
+        &self,
+        id: &str,
+        user_id: Uuid,
+    ) -> Result<bool, DomainError>;
 
     /// Copies an entire folder subtree atomically (WebDAV COPY Depth: infinity).
+    /// enforcing that `caller_id` owns both the source folder
+    /// and the target parent folder.
     ///
     /// Creates a copy of `source_folder_id` (with optional name override) under
     /// `target_parent_id`, including ALL sub-folders and files. Files are
     /// zero-copy (blob ref_counts incremented in batch).
     ///
     /// Default: returns error (only available with PostgreSQL backend).
-    async fn copy_folder_tree(
-        &self,
-        _source_folder_id: &str,
-        _target_parent_id: Option<String>,
-        _dest_name: Option<String>,
-    ) -> Result<CopyFolderTreeResult, DomainError> {
-        Err(DomainError::internal_error(
-            "FileManagement",
-            "copy_folder_tree not implemented",
-        ))
-    }
-
-    /// Copies a folder tree, enforcing that `caller_id` owns both the source folder
-    /// and the target parent folder.
-    async fn copy_folder_tree_owned(
+    async fn copy_folder_tree_with_perms(
         &self,
         source_folder_id: &str,
         caller_id: Uuid,
