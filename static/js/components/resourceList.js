@@ -115,6 +115,14 @@ export class ResourceListComponent {
          */
         this._groupLabelFn = undefined;
 
+        /**
+         * Optional node-builder stored between `render()` and `append()` calls.
+         * When set, the swimlane header renders a DOM node instead of plain text
+         * (e.g. a user vignette for the "owner" group-by dimension).
+         * @type {((key: string) => HTMLElement) | undefined}
+         */
+        this._headerNodeFn = undefined;
+
         this._ownerVisible = this._cfg.showOwner;
 
         this._initDelegation();
@@ -138,8 +146,12 @@ export class ResourceListComponent {
      * @param {((key: string) => string)=} groupLabelFn
      *   Optional: converts the raw grouping key to a human-readable header
      *   label.  When omitted the key itself is used.
+     * @param {((key: string) => HTMLElement)=} headerNodeFn
+     *   Optional: builds a rich DOM node for the swimlane header (e.g. a user
+     *   vignette for the "owner" group-by).  When provided, `groupLabelFn` is
+     *   ignored for the header and the returned node is appended instead.
      */
-    render(items, groupFn, groupLabelFn) {
+    render(items, groupFn, groupLabelFn, headerNodeFn) {
         const header = this._container.querySelector('.list-header');
         this._container.innerHTML = '';
         if (header) this._container.appendChild(header);
@@ -151,11 +163,12 @@ export class ResourceListComponent {
         this._lastGroupKey = undefined;
         this._lastGroupEl = null;
         this._groupLabelFn = groupLabelFn;
+        this._headerNodeFn = headerNodeFn;
 
         // Prevent ui.js global delegation from firing on this container
         this._container.dataset.managedBy = 'resource-list';
 
-        this._appendItems(items, groupFn, groupLabelFn);
+        this._appendItems(items, groupFn, groupLabelFn, headerNodeFn);
         this._wireSelectAll();
     }
 
@@ -167,9 +180,10 @@ export class ResourceListComponent {
      * @param {Array<FileItem|FolderItem>} items
      * @param {((item: FileItem|FolderItem) => string|null)=} groupFn
      * @param {((key: string) => string)=} groupLabelFn
+     * @param {((key: string) => HTMLElement)=} headerNodeFn
      */
-    append(items, groupFn, groupLabelFn) {
-        this._appendItems(items, groupFn, groupLabelFn ?? this._groupLabelFn);
+    append(items, groupFn, groupLabelFn, headerNodeFn) {
+        this._appendItems(items, groupFn, groupLabelFn ?? this._groupLabelFn, headerNodeFn ?? this._headerNodeFn);
     }
 
     /** Remove all items (but keep `.list-header` if present). */
@@ -328,8 +342,9 @@ export class ResourceListComponent {
      * @param {Array<FileItem|FolderItem>} items
      * @param {((item: FileItem|FolderItem) => string|null)=} groupFn
      * @param {((key: string) => string)=} groupLabelFn
+     * @param {((key: string) => HTMLElement)=} headerNodeFn
      */
-    _appendItems(items, groupFn, groupLabelFn) {
+    _appendItems(items, groupFn, groupLabelFn, headerNodeFn) {
         const fragment = document.createDocumentFragment();
 
         // Start from the persisted key so load-more pages continue seamlessly.
@@ -354,7 +369,7 @@ export class ResourceListComponent {
                     if (key !== null) {
                         fragmentGroup = document.createElement('div');
                         fragmentGroup.className = 'resource-list__swimlane-group';
-                        fragmentGroup.appendChild(this._createGroupHeader(key, groupLabelFn));
+                        fragmentGroup.appendChild(this._createGroupHeader(key, groupLabelFn, headerNodeFn));
                         fragment.appendChild(fragmentGroup);
                     }
                 }
@@ -382,14 +397,25 @@ export class ResourceListComponent {
 
     /**
      * Create a swimlane divider element.
-     * @param {string} key       - Raw grouping key (e.g. UUID or bucket name).
-     * @param {((key: string) => string)=} labelFn - Optional human-readable resolver.
+     *
+     * When `headerNodeFn` is supplied the header renders a rich DOM node
+     * (e.g. a user vignette) instead of plain text; the `--node` CSS modifier
+     * is added to suppress the small-caps / uppercase text styles.
+     *
+     * @param {string} key - Raw grouping key (e.g. UUID or bucket name).
+     * @param {((key: string) => string)=}      labelFn     - Optional plain-text resolver.
+     * @param {((key: string) => HTMLElement)=} headerNodeFn - Optional rich-node builder.
      */
-    _createGroupHeader(key, labelFn) {
+    _createGroupHeader(key, labelFn, headerNodeFn) {
         const el = document.createElement('div');
         el.className = 'resource-list__swimlane-header';
         el.dataset.swimlaneHeader = 'true';
-        el.textContent = labelFn ? labelFn(key) : key;
+        if (headerNodeFn) {
+            el.classList.add('resource-list__swimlane-header--node');
+            el.appendChild(headerNodeFn(key));
+        } else {
+            el.textContent = labelFn ? labelFn(key) : key;
+        }
         return el;
     }
 
@@ -407,6 +433,7 @@ export class ResourceListComponent {
         el.dataset.folderName = folder.name;
         el.dataset.parentId = folder.parent_id || '';
         if (folder.path) el.dataset.path = folder.path;
+        if (folder.owner_id) el.dataset.ownerId = folder.owner_id;
         if (cfg.draggable) el.setAttribute('draggable', 'true');
 
         const isFav = cfg.isFavorite ? cfg.isFavorite(folder.id, 'folder') : false;
@@ -463,6 +490,7 @@ export class ResourceListComponent {
         el.dataset.fileName = file.name;
         el.dataset.folderId = file.folder_id || '';
         if (file.path) el.dataset.path = file.path;
+        if (file.owner_id) el.dataset.ownerId = file.owner_id;
         if (cfg.draggable) el.setAttribute('draggable', 'true');
 
         el.innerHTML = `
@@ -489,6 +517,7 @@ export class ResourceListComponent {
         const thumb = /** @type {HTMLImageElement | null} */ (el.querySelector('.file-thumb'));
         if (thumb) {
             thumb.addEventListener('error', () => {
+                console.log(`no thumbnail for ${file.id} (${file.name}), request thumbnail generation from client side`);
                 thumb.classList.add('hidden');
                 thumbnail?.queueGenerate(file, (dataUrl) => {
                     thumb.src = dataUrl;

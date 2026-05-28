@@ -10,10 +10,16 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
 
+use crate::application::dtos::display_helpers::{
+    category_for, format_file_size, icon_class_for, icon_special_class_for,
+};
+use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::{
-    CreateFolderDto, FolderDto, MoveFolderDto, RenameFolderDto,
+    CreateFolderDto, FolderDto, FolderResourceItemDto, FolderResourcesDto, FolderResourcesQuery,
+    ListResourcesOptions, MoveFolderDto, RenameFolderDto,
 };
 use crate::application::dtos::folder_listing_dto::FolderListingDto;
+use crate::application::dtos::grant_dto::{ResourceContentDto, ResourceTypeDto};
 use crate::application::dtos::pagination::PaginationRequestDto;
 use crate::application::ports::file_ports::FileRetrievalUseCase;
 use crate::application::ports::folder_ports::FolderUseCase;
@@ -466,6 +472,7 @@ pub async fn list_root_folders(
     FolderHandler::list_root_folders_impl(state, auth_user).await
 }
 
+#[deprecated = "Use /api/folders/{id}/resources instead"]
 #[utoipa::path(
     get,
     path = "/api/folders/{id}/contents",
@@ -477,6 +484,7 @@ pub async fn list_root_folders(
     security(("bearerAuth" = [])),
     tag = "folders"
 )]
+#[allow(deprecated)]
 pub async fn list_folder_contents(
     state: State<AppState>,
     auth_user: AuthUser,
@@ -503,6 +511,7 @@ pub async fn list_root_folders_paginated(
     FolderHandler::list_root_folders_paginated_impl(state, auth_user, pagination).await
 }
 
+#[deprecated = "Use /api/folders/{id}/resources instead"]
 #[utoipa::path(
     get,
     path = "/api/folders/{id}/contents/paginated",
@@ -517,6 +526,7 @@ pub async fn list_root_folders_paginated(
     security(("bearerAuth" = [])),
     tag = "folders"
 )]
+#[allow(deprecated)]
 pub async fn list_folder_contents_paginated(
     state: State<AppState>,
     auth_user: AuthUser,
@@ -526,6 +536,7 @@ pub async fn list_folder_contents_paginated(
     FolderHandler::list_folder_contents_paginated_impl(state, auth_user, path, pagination).await
 }
 
+#[deprecated = "Use /api/folders/{id}/resources instead"]
 #[utoipa::path(
     get,
     path = "/api/folders/{id}/listing",
@@ -538,6 +549,7 @@ pub async fn list_folder_contents_paginated(
     security(("bearerAuth" = [])),
     tag = "folders"
 )]
+#[allow(deprecated)]
 pub async fn list_folder_listing(
     state: State<Arc<GlobalAppState>>,
     auth_user: AuthUser,
@@ -627,4 +639,106 @@ pub async fn download_folder_zip(
     query: Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     FolderHandler::download_folder_zip_impl(state, auth_user, path, query).await
+}
+
+// ── GET /api/folders/{id}/resources ─────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/api/folders/{id}/resources",
+    params(
+        ("id" = String, Path, description = "Folder ID"),
+        FolderResourcesQuery,
+    ),
+    responses(
+        (status = 200,
+         description = "Cursor-paginated files and folders inside the requested folder. \
+                        Items arrive in `order_by` order (folders first when order_by=name). \
+                        `next_cursor` is absent on the last page.",
+         body = FolderResourcesDto),
+        (status = 404, description = "Folder not found or access denied"),
+    ),
+    tag = "folders"
+)]
+pub async fn list_folder_resources(
+    State(service): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<String>,
+    Query(q): Query<FolderResourcesQuery>,
+) -> impl IntoResponse {
+    let order_by = q.order_by.clone().unwrap_or_else(|| "name".to_owned());
+    let kinds = q.resource_kinds();
+    let opts = ListResourcesOptions {
+        limit: q.limit_clamped(),
+        cursor: q.decode_cursor(),
+        order_by: &order_by,
+        kinds: kinds.as_deref(),
+        reverse: q.reverse,
+    };
+
+    match service
+        .list_resources_paged_with_perms(&id, auth_user.id, opts)
+        .await
+    {
+        Ok((rows, next_cursor)) => {
+            let items: Vec<FolderResourceItemDto> = rows
+                .into_iter()
+                .map(|row| {
+                    if row.resource_type == "folder" {
+                        let dto = FolderDto {
+                            id: row.id.to_string(),
+                            name: row.name.clone(),
+                            path: String::new(), // cleared — share recipients must not see hierarchy
+                            parent_id: row.parent_id.map(|u| u.to_string()),
+                            owner_id: Some(row.owner_id.to_string()),
+                            created_at: row.created_at.timestamp() as u64,
+                            modified_at: row.modified_at.timestamp() as u64,
+                            is_root: false,
+                            icon_class: Arc::from("fas fa-folder"),
+                            icon_special_class: Arc::from("folder-icon"),
+                            category: Arc::from("Folder"),
+                        };
+                        FolderResourceItemDto {
+                            resource_type: ResourceTypeDto::Folder,
+                            resource: ResourceContentDto::Folder(dto),
+                        }
+                    } else {
+                        let mime = row
+                            .mime_type
+                            .as_deref()
+                            .unwrap_or("application/octet-stream");
+                        let size_bytes = row.size.max(0) as u64;
+                        let dto = FileDto {
+                            id: row.id.to_string(),
+                            name: row.name.clone(),
+                            path: String::new(),
+                            size: size_bytes,
+                            mime_type: Arc::from(mime),
+                            folder_id: row.parent_id.map(|u| u.to_string()),
+                            created_at: row.created_at.timestamp() as u64,
+                            modified_at: row.modified_at.timestamp() as u64,
+                            icon_class: Arc::from(icon_class_for(&row.name, mime)),
+                            icon_special_class: Arc::from(icon_special_class_for(&row.name, mime)),
+                            category: Arc::from(category_for(&row.name, mime)),
+                            size_formatted: format_file_size(size_bytes),
+                            owner_id: Some(row.owner_id.to_string()),
+                            sort_date: None,
+                            etag: String::new(),
+                        };
+                        FolderResourceItemDto {
+                            resource_type: ResourceTypeDto::File,
+                            resource: ResourceContentDto::File(dto),
+                        }
+                    }
+                })
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(FolderResourcesDto::with_cursor(items, next_cursor)),
+            )
+                .into_response()
+        }
+        Err(e) => AppError::from(e).into_response(),
+    }
 }

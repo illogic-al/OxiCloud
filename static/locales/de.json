@@ -430,7 +430,8 @@
         "clear": "Zuletzt verwendete löschen",
         "accessed": "Zugegriffen",
         "empty_state": "Keine zuletzt verwendeten Dateien",
-        "empty_hint": "Dateien, die Sie öffnen, werden hier angezeigt"
+        "empty_hint": "Dateien, die Sie öffnen, werden hier angezeigt",
+        "loadMore": "Mehr laden"
     },
     "notifications": {
         "file_renamed": "Datei umbenannt",
@@ -715,7 +716,14 @@
         "none": "Keine",
         "title": "Gruppieren nach",
         "owner": "Eigentümer",
-        "shareDate": "Freigabedatum"
+        "shareDate": "Freigabedatum",
+        "type": "Typ",
+        "type.folders": "Ordner",
+        "accessedAt": "Zugriffsdatum",
+        "modifiedAt": "Änderungsdatum",
+        "createdAt": "Erstellungsdatum",
+        "size": "Größe",
+        "favoriteDate": "Datum der Markierung"
     },
     "dateBucket": {
         "today": "Heute",

@@ -12,9 +12,11 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::application::dtos::folder_dto::{FolderResourceCursor, FolderResourceRow};
 use crate::common::errors::DomainError;
 use crate::domain::entities::folder::Folder;
 use crate::domain::repositories::folder_repository::FolderRepository;
+use crate::domain::services::authorization::ResourceKind;
 use crate::domain::services::path_service::StoragePath;
 
 /// Type alias for folder metadata rows from SQL queries.
@@ -1059,5 +1061,239 @@ impl FolderDbRepository {
             ));
         }
         Ok(())
+    }
+
+    /// Cursor-paginated combined listing of sub-folders and files inside
+    /// `parent_id`, sorted by `order_by`.
+    ///
+    /// **Authorization must be verified by the caller** before invoking this
+    /// method — no ownership filter is applied here.
+    ///
+    /// Fetches `limit` rows (caller should pass `desired_page_size + 1` to
+    /// detect the existence of a next page).  Returns raw [`FolderResourceRow`]
+    /// values; the handler / service layer converts them to DTOs.
+    pub async fn list_resources_paged(
+        &self,
+        parent_id: Uuid,
+        limit: usize,
+        cursor: Option<&FolderResourceCursor>,
+        order_by: &str,
+        kinds: Option<&[ResourceKind]>,
+        reverse: bool,
+    ) -> Result<Vec<FolderResourceRow>, DomainError> {
+        let include_folders = kinds.is_none_or(|k| k.contains(&ResourceKind::Folder));
+        let include_files = kinds.is_none_or(|k| k.contains(&ResourceKind::File));
+
+        if !include_folders && !include_files {
+            return Ok(Vec::new());
+        }
+
+        // ── CTE branches ────────────────────────────────────────────────────
+        let folder_branch = r#"
+            SELECT
+                'folder'::text            AS resource_type,
+                f.id,
+                f.name,
+                f.parent_id               AS folder_id,
+                NULL::text                AS mime_type,
+                -1::bigint                AS size,
+                f.created_at,
+                f.updated_at              AS modified_at,
+                f.user_id,
+                LOWER(f.name)             AS sort_str,
+                0::bigint                 AS type_order,
+                0::int                    AS folder_first
+            FROM storage.folders f
+            WHERE f.parent_id = $1::uuid AND NOT f.is_trashed
+        "#;
+
+        let file_branch = r#"
+            SELECT
+                'file'::text              AS resource_type,
+                fm.id,
+                fm.name,
+                fm.folder_id,
+                fm.mime_type,
+                fm.size::bigint,
+                fm.created_at,
+                fm.updated_at             AS modified_at,
+                fm.user_id,
+                LOWER(fm.name)            AS sort_str,
+                fm.category_order::bigint AS type_order,
+                1::int                    AS folder_first
+            FROM storage.files fm
+            WHERE fm.folder_id = $1::uuid AND NOT fm.is_trashed
+        "#;
+
+        let cte_inner = match (include_folders, include_files) {
+            (true, true) => format!("{folder_branch} UNION ALL {file_branch}"),
+            (true, false) => folder_branch.to_owned(),
+            (false, true) => file_branch.to_owned(),
+            (false, false) => unreachable!(),
+        };
+
+        // ── Cursor binds ─────────────────────────────────────────────────────
+        // $1 = parent_id   $2 = cursor_str   $3 = cursor_int
+        // $4 = cursor_ts   $5 = cursor_id    $6 = limit
+        let cursor_str = cursor.and_then(|c| c.sort_str.clone());
+        let cursor_int = cursor.and_then(|c| c.sort_int);
+        let cursor_ts = cursor.and_then(|c| c.sort_ts);
+        let cursor_id = cursor.map(|c| c.resource_id);
+
+        // ── Sort-specific WHERE + ORDER BY ───────────────────────────────────
+        // Each arm produces two variants based on `reverse`.
+        // For "name": folder_first stays ASC in both directions (folders always
+        // precede files); only the alpha order within each group flips.
+        let (where_clause, order_clause) = match order_by {
+            "type" => {
+                if reverse {
+                    (
+                        r#"WHERE ($3::bigint IS NULL)
+                              OR (type_order < $3)
+                              OR (type_order = $3 AND sort_str < $2)
+                              OR (type_order = $3 AND sort_str = $2 AND id < $5::uuid)"#,
+                        "ORDER BY type_order DESC, sort_str DESC, id DESC",
+                    )
+                } else {
+                    (
+                        r#"WHERE ($3::bigint IS NULL)
+                              OR (type_order > $3)
+                              OR (type_order = $3 AND sort_str > $2)
+                              OR (type_order = $3 AND sort_str = $2 AND id > $5::uuid)"#,
+                        "ORDER BY type_order ASC, sort_str ASC, id ASC",
+                    )
+                }
+            }
+            "modified_at" => {
+                if reverse {
+                    (
+                        r#"WHERE ($4::timestamptz IS NULL)
+                              OR (modified_at > $4)
+                              OR (modified_at = $4 AND id > $5::uuid)"#,
+                        "ORDER BY modified_at ASC, id ASC",
+                    )
+                } else {
+                    (
+                        r#"WHERE ($4::timestamptz IS NULL)
+                              OR (modified_at < $4)
+                              OR (modified_at = $4 AND id < $5::uuid)"#,
+                        "ORDER BY modified_at DESC, id DESC",
+                    )
+                }
+            }
+            "created_at" => {
+                if reverse {
+                    (
+                        r#"WHERE ($4::timestamptz IS NULL)
+                              OR (created_at > $4)
+                              OR (created_at = $4 AND id > $5::uuid)"#,
+                        "ORDER BY created_at ASC, id ASC",
+                    )
+                } else {
+                    (
+                        r#"WHERE ($4::timestamptz IS NULL)
+                              OR (created_at < $4)
+                              OR (created_at = $4 AND id < $5::uuid)"#,
+                        "ORDER BY created_at DESC, id DESC",
+                    )
+                }
+            }
+            "size" => {
+                if reverse {
+                    (
+                        r#"WHERE ($3::bigint IS NULL)
+                              OR (size < $3)
+                              OR (size = $3 AND id < $5::uuid)"#,
+                        "ORDER BY size DESC, id DESC",
+                    )
+                } else {
+                    (
+                        r#"WHERE ($3::bigint IS NULL)
+                              OR (size > $3)
+                              OR (size = $3 AND id > $5::uuid)"#,
+                        "ORDER BY size ASC, id ASC",
+                    )
+                }
+            }
+            _ => {
+                // "name" (default): folder_first stays ASC so folders always precede
+                // files; only the alpha order within each group flips when reversed.
+                if reverse {
+                    (
+                        r#"WHERE ($3::bigint IS NULL)
+                              OR (folder_first::bigint > $3)
+                              OR (folder_first::bigint = $3 AND sort_str < $2)
+                              OR (folder_first::bigint = $3 AND sort_str = $2 AND id < $5::uuid)"#,
+                        "ORDER BY folder_first ASC, sort_str DESC, id DESC",
+                    )
+                } else {
+                    (
+                        r#"WHERE ($3::bigint IS NULL)
+                              OR (folder_first::bigint > $3)
+                              OR (folder_first::bigint = $3 AND sort_str > $2)
+                              OR (folder_first::bigint = $3 AND sort_str = $2 AND id > $5::uuid)"#,
+                        "ORDER BY folder_first ASC, sort_str ASC, id ASC",
+                    )
+                }
+            }
+        };
+
+        let sql = format!(
+            "WITH resources AS ({cte_inner}) \
+             SELECT resource_type, id, name, folder_id, mime_type, size, \
+                    created_at, modified_at, user_id, sort_str, type_order, folder_first \
+             FROM resources \
+             {where_clause} \
+             {order_clause} \
+             LIMIT $6"
+        );
+
+        // Row: (resource_type, id, name, folder_id, mime_type, size,
+        //        created_at, modified_at, user_id, sort_str, type_order, folder_first)
+        type Row = (
+            String,
+            Uuid,
+            String,
+            Option<Uuid>,
+            Option<String>,
+            i64,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+            Uuid,
+            String,
+            i64,
+            i32,
+        );
+
+        let rows = sqlx::query_as::<_, Row>(&sql)
+            .bind(parent_id)
+            .bind(cursor_str)
+            .bind(cursor_int)
+            .bind(cursor_ts)
+            .bind(cursor_id)
+            .bind(limit as i64)
+            .fetch_all(self.pool())
+            .await
+            .map_err(|e| {
+                DomainError::internal_error("FolderDb", format!("list_resources_paged: {e}"))
+            })?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| FolderResourceRow {
+                resource_type: r.0,
+                id: r.1,
+                name: r.2,
+                parent_id: r.3,
+                mime_type: r.4,
+                size: r.5,
+                created_at: r.6,
+                modified_at: r.7,
+                owner_id: r.8,
+                sort_str: r.9,
+                type_order: r.10,
+                folder_first: r.11,
+            })
+            .collect())
     }
 }

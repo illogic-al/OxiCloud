@@ -89,15 +89,17 @@ const grants = {
      * @param {number}             [opts.limit]         - Max items per page (1–200, default 50).
      * @param {string}             [opts.cursor]        - Opaque cursor from a previous call; omit for first page.
      * @param {string}             [opts.orderBy]       - Sort dimension: 'granted_at' | 'granted_by' (default: 'granted_at').
+     * @param {boolean}            [opts.reverse]       - Reverse the sort order (default: false).
      * @returns {Promise<SharedWithMeResponse>}
      */
-    async fetchSharedWithMe({ resourceTypes = ['file', 'folder'], limit = 50, cursor, orderBy } = {}) {
+    async fetchSharedWithMe({ resourceTypes = ['file', 'folder'], limit = 50, cursor, orderBy, reverse = false } = {}) {
         const params = new URLSearchParams({
             limit: String(limit),
             resource_types: resourceTypes.join(',')
         });
         if (cursor) params.set('cursor', cursor);
         if (orderBy) params.set('sort_by', orderBy);
+        if (reverse) params.set('reverse', 'true');
 
         const response = await fetch(`/api/grants/incoming/resources?${params}`);
 

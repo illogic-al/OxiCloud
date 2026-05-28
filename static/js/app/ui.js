@@ -7,6 +7,7 @@
 
 import { i18n } from '../core/i18n.js';
 import { OxiIcons } from '../core/icons.js';
+import * as viewPrefs from '../core/viewPrefs.js';
 import { batchToolbar } from '../features/files/batchToolbar.js';
 import { contextMenus } from '../features/files/contextMenus.js';
 import { fileOps } from '../features/files/fileOperations.js';
@@ -419,6 +420,7 @@ const ui = {
     switchToGridView() {
         app.currentView = 'grid';
         localStorage.setItem('oxicloud-view', 'grid');
+        if (app.currentSection) viewPrefs.saveView(app.currentSection, 'grid');
 
         syncViewContainers();
     },
@@ -429,6 +431,7 @@ const ui = {
     switchToListView() {
         app.currentView = 'list';
         localStorage.setItem('oxicloud-view', 'list');
+        if (app.currentSection) viewPrefs.saveView(app.currentSection, 'list');
 
         syncViewContainers();
     },

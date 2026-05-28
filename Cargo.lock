@@ -3692,6 +3692,7 @@ dependencies = [
  "oxc_codegen",
  "oxc_minifier",
  "oxc_parser",
+ "oxc_semantic",
  "oxc_span",
  "percent-encoding",
  "quick-xml 0.39.2",

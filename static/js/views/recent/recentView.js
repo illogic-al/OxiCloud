@@ -1,13 +1,20 @@
+// @ts-check
+
 /**
- * OxiCloud – "Shared with me" view.
+ * OxiCloud – Recent view.
  *
- * Renders files and folders that other users have explicitly granted the
- * current user access to, using the cursor-paginated
- * `GET /api/grants/incoming/resources` endpoint.
+ * Renders files and folders the current user has recently accessed, using the
+ * cursor-paginated `GET /api/recent/resources` endpoint.
  *
- * Uses `ResourceListComponent` so the grid ↔ list toggle and all card
- * components work out of the box. A "Load more" button is injected below
- * the files container for cursor-based pagination.
+ * Default sort: `accessed_at` DESC (most recently accessed first, no swimlanes).
+ * The user can pick any group-by from the dropdown; viewPrefs persists the choice.
+ *
+ * Public API mirrors `favoritesView`:
+ *   - `groupByDefs`            — array of group-by dimension definitions
+ *   - `setGroupBy(key)`        — change active dimension + reload from page 1
+ *   - `setDirection(reversed)` — flip sort direction + reload from page 1
+ *   - `init()`                 — (re-)enter the section; restores prefs + loads page 1
+ *   - `hide()`                 — called when leaving this section
  */
 
 import { ui } from '../../app/ui.js';
@@ -19,10 +26,10 @@ import * as viewPrefs from '../../core/viewPrefs.js';
 import { batchToolbar } from '../../features/files/batchToolbar.js';
 import * as itemTooltip from '../../features/itemTooltip.js';
 import { favorites } from '../../features/library/favorites.js';
-import { grants } from '../../model/grants.js';
+import { fetchRecentPage } from '../../model/recentModel.js';
 import { systemUsers } from '../../model/systemUsers.js';
 
-/** @import {SharedWithMeItem, FileItem, FolderItem, ResourceTypeEnum} from '../../core/types.js' */
+/** @import {FileItem, FolderItem, ResourceTypeEnum} from '../../core/types.js' */
 
 /**
  * @typedef {{ key: string, label: string, orderBy: string,
@@ -32,33 +39,31 @@ import { systemUsers } from '../../model/systemUsers.js';
  */
 
 /**
- * Group-by dimension definitions for this section.
- * Exported via `sharedWithMeView.groupByDefs` so `main.js` can populate
- * the dropdown dynamically without knowing the internals of this view.
+ * @typedef {Object} RecentResourceItem
+ * @property {ResourceTypeEnum}    resource_type
+ * @property {string}              accessed_at
+ * @property {FileItem|FolderItem} resource
+ */
+
+/**
+ * Group-by dimension definitions for the Recent section.
  *
- * `keyFn` returns the grouping key (stable UUID for owner, or a
- * human-readable bucket label for shareDate — the bucket IS the key because
- * it is already derived from the date, so no separate `labelFn` is needed
- * for shareDate).
+ * When `_groupBy === ''` (None selected), items are sorted by `accessed_at` DESC —
+ * the natural expectation for a "Recent" section. "None" = flat chronological feed.
  *
  * @type {GroupByDef[]}
  */
 const GROUP_BY_DEFS = [
     {
         key: 'owner',
-        // label is accessed via syncGroupByMenu → read at section-switch time,
-        // when translations are guaranteed to be loaded.
         get label() {
             return i18n.t('groupby.owner', 'Owner');
         },
-        orderBy: 'granted_by',
-        // keyFn groups by UUID — stable and unique, avoids collisions between
-        // users with the same display name.
+        orderBy: 'owner',
         keyFn: (item) => {
             const r = /** @type {Record<string,string>} */ (/** @type {unknown} */ (item));
             return r.owner_id || null;
         },
-        // labelFn resolves UUID → display name from the pre-fetched cache.
         labelFn: (id) => systemUsers.getDisplayNameSync(id),
         headerNodeFn: (id) => createUserVignette(id, 'sm')
     },
@@ -68,28 +73,24 @@ const GROUP_BY_DEFS = [
             return i18n.t('groupby.type', 'Type');
         },
         orderBy: 'type',
-        // keyFn: folders get their own swimlane; files use the pre-computed
-        // `category` field from the DTO (e.g. 'Image', 'Video', 'Audio' …).
-        // The server orders by category_order (a pre-computed SMALLINT column)
-        // so items within the same category arrive grouped — no client sort needed.
         keyFn: (item) => ('mime_type' in item ? /** @type {Record<string,string>} */ (/** @type {unknown} */ (item)).category || 'other' : 'Folder'),
         labelFn: (key) => {
             // biome-ignore format: keep indentation
             /** @type {Record<string, string>} */
             const labels = {
-                Folder:       i18n.t('groupby.type.folders', 'Folders'),
-                Image:        i18n.t('category.images', 'Images'),
-                Video:        i18n.t('category.videos', 'Videos'),
-                Audio:        i18n.t('category.audio', 'Audio'),
+                Folder:       i18n.t('groupby.type.folders',     'Folders'),
+                Image:        i18n.t('category.images',          'Images'),
+                Video:        i18n.t('category.videos',          'Videos'),
+                Audio:        i18n.t('category.audio',           'Audio'),
                 PDF:          'PDF',
-                Document:     i18n.t('category.documents', 'Documents'),
-                Spreadsheet:  i18n.t('category.spreadsheets', 'Spreadsheets'),
-                Presentation: i18n.t('category.presentations', 'Presentations'),
-                Archive:      i18n.t('category.archives', 'Archives'),
-                Code:         i18n.t('category.code', 'Code'),
-                Markdown:     i18n.t('category.markdown', 'Markdown'),
-                Text:         i18n.t('category.text', 'Text'),
-                Installer:    i18n.t('category.installers', 'Installers')
+                Document:     i18n.t('category.documents',       'Documents'),
+                Spreadsheet:  i18n.t('category.spreadsheets',    'Spreadsheets'),
+                Presentation: i18n.t('category.presentations',   'Presentations'),
+                Archive:      i18n.t('category.archives',        'Archives'),
+                Code:         i18n.t('category.code',            'Code'),
+                Markdown:     i18n.t('category.markdown',        'Markdown'),
+                Text:         i18n.t('category.text',            'Text'),
+                Installer:    i18n.t('category.installers',      'Installers')
             };
             return labels[key] ?? key;
         }
@@ -100,37 +101,41 @@ const GROUP_BY_DEFS = [
             return i18n.t('groupby.size', 'Size');
         },
         orderBy: 'size',
-        // keyFn: the key IS the bucket label returned by sizeBucket(), so no
-        // separate labelFn is needed (same pattern as shareDate).
-        // Folders have no size — sizeBucket(-1) returns the "Folders" label.
         keyFn: (item) => {
             if (!('mime_type' in item)) return sizeBucket(-1);
             const r = /** @type {Record<string,number>} */ (/** @type {unknown} */ (item));
             return sizeBucket(r.size ?? 0);
         }
-        // No labelFn: keyFn already returns the human-readable label.
     },
     {
-        key: 'shareDate',
+        key: 'accessedAt',
         get label() {
-            return i18n.t('groupby.shareDate', 'Share date');
+            return i18n.t('groupby.accessedAt', 'Accessed date');
         },
-        orderBy: 'granted_at',
-        // keyFn returns the human-readable bucket label; the label IS the key
-        // because consecutive items with the same bucket should be in one group.
-        // sort_date is stored as unix seconds (number) in _mapItems().
+        orderBy: 'accessed_at',
+        // sort_date is unix seconds set in _mapItems(); keyFn returns the bucket label.
         keyFn: (item) => {
             const r = /** @type {Record<string,number>} */ (/** @type {unknown} */ (item));
             return r.sort_date ? normalizeDateBucket(r.sort_date) : null;
         }
-        // No labelFn: keyFn already returns the human-readable label.
+    },
+    {
+        key: 'modifiedAt',
+        get label() {
+            return i18n.t('groupby.modifiedAt', 'Modified date');
+        },
+        orderBy: 'modified_at',
+        keyFn: (item) => {
+            const r = /** @type {Record<string,number>} */ (/** @type {unknown} */ (item));
+            return r.modified_at ? normalizeDateBucket(r.modified_at) : null;
+        }
     }
 ];
 
 /** ID of the "Load more" wrapper injected below `.files-container`. */
-const LOAD_MORE_ID = 'swm-load-more-wrapper';
+const LOAD_MORE_ID = 'recent-load-more-wrapper';
 
-const sharedWithMeView = {
+const recentView = {
     // ── State ─────────────────────────────────────────────────────────────────
 
     /** @type {string|null} */
@@ -142,7 +147,7 @@ const sharedWithMeView = {
     _component: null,
 
     /**
-     * Active group-by key. '' = no grouping, 'owner' | 'shareDate' = active.
+     * Active group-by key. '' = no grouping (sorted by accessed_at DESC).
      * @type {string}
      */
     _groupBy: '',
@@ -164,13 +169,13 @@ const sharedWithMeView = {
     /**
      * Change the active group-by dimension and reload from page 1.
      * Calling with the current key is a no-op.
-     * @param {string} key  '' | 'owner' | 'shareDate'
+     * @param {string} key
      */
     setGroupBy(key) {
         if (this._groupBy === key) return;
         this._groupBy = key;
-        viewPrefs.save('sharedwithme', this._groupBy, this._reversed, viewPrefs.load('sharedwithme').view);
-        this._nextCursor = null; // restart from first page
+        viewPrefs.save('recent', this._groupBy, this._reversed, viewPrefs.load('recent').view);
+        this._nextCursor = null;
         this._component?.clear();
         this._loadPage();
     },
@@ -183,35 +188,32 @@ const sharedWithMeView = {
     setDirection(reversed) {
         if (this._reversed === reversed) return;
         this._reversed = reversed;
-        viewPrefs.save('sharedwithme', this._groupBy, this._reversed, viewPrefs.load('sharedwithme').view);
+        viewPrefs.save('recent', this._groupBy, this._reversed, viewPrefs.load('recent').view);
         this._nextCursor = null;
         this._component?.clear();
         this._loadPage();
     },
 
     /**
-     * (Re-)load from page 1 and render into the existing files container.
-     * Called every time the user switches to this section.
+     * (Re-)enter the Recent section: restore saved prefs, create / reuse the
+     * component, and load page 1.
      */
     async init() {
         this._nextCursor = null;
         this._loading = false;
-        const _savedPrefs = viewPrefs.load('sharedwithme');
-        this._groupBy = _savedPrefs.groupBy;
-        this._reversed = _savedPrefs.reversed;
+        const savedPrefs = viewPrefs.load('recent');
+        this._groupBy = savedPrefs.groupBy;
+        this._reversed = savedPrefs.reversed;
 
         this._ensureLoadMoreButton();
 
-        // Start fetching system users in background so tooltips resolve instantly
-        // by the time the user hovers over an item.
+        // Prefetch system users so owner tooltips resolve without delay.
         systemUsers.prefetch();
 
-        // Standard files-view setup: clear list, show container
         ui.resetFilesList();
         batchToolbar.init();
         ui.updateBreadcrumb();
 
-        // Create (or re-use) the component bound to #files-list.
         const filesList = document.getElementById('files-list');
         if (filesList) {
             if (!this._component) {
@@ -275,27 +277,21 @@ const sharedWithMeView = {
     // ── Internal helpers ──────────────────────────────────────────────────────
 
     /**
-     * Fetch one page, map items → FileItem / FolderItem, render them, then
-     * wire the owner tooltip.
+     * Fetch one page, map items → FileItem / FolderItem, render them.
      * @returns {Promise<void>}
      */
     async _loadPage() {
         if (this._loading) return;
         this._loading = true;
 
-        // Remember whether this is a fresh first-page load (cursor was null on
-        // entry) so we know whether to replace or append items.
         const isFirstPage = this._nextCursor === null;
 
         try {
             const def = GROUP_BY_DEFS.find((d) => d.key === this._groupBy);
+            // When no group-by is active, sort by accessed_at DESC (most recent first).
+            const orderBy = def?.orderBy ?? 'accessed_at';
 
-            // When no swimlane grouping is active, sort by resource name so the
-            // list is alphabetical (same expectation as the Files section).
-            // Group-by modes supply their own orderBy via the def.
-            const orderBy = def?.orderBy ?? 'name';
-
-            const data = await grants.fetchSharedWithMe({
+            const data = await fetchRecentPage({
                 resourceTypes: /** @type {ResourceTypeEnum[]} */ (['file', 'folder']),
                 limit: 50,
                 cursor: this._nextCursor ?? undefined,
@@ -306,11 +302,10 @@ const sharedWithMeView = {
             this._nextCursor = data.next_cursor ?? null;
 
             if (data.items.length === 0 && isFirstPage) {
-                // First page came back empty
                 ui.showError(`
-                    <i class="fas fa-share-alt empty-state-icon"></i>
-                    <p>${i18n.t('sharedwithme_emptyStateTitle', 'Nothing shared with you yet')}</p>
-                    <p>${i18n.t('sharedwithme_emptyStateDesc', 'Items shared with you by other users will appear here')}</p>
+                    <i class="fas fa-clock empty-state-icon"></i>
+                    <p>${i18n.t('recent.empty_state', 'No recent files')}</p>
+                    <p>${i18n.t('recent.empty_hint', 'Files you open will appear here')}</p>
                 `);
                 this._setLoadMoreVisible(false);
                 return;
@@ -324,11 +319,10 @@ const sharedWithMeView = {
                 this._component?.append(items, def?.keyFn, def?.labelFn, def?.headerNodeFn);
             }
 
-            // Wire owner tooltips after items are in the DOM
+            // Wire unified item tooltip (owner + path) after items are in the DOM.
             const filesList = document.getElementById('files-list');
             if (filesList) itemTooltip.init(filesList);
 
-            // Fill the Owner column cells (idempotent: skips already-resolved rows).
             await this._component?.resolveOwnerCells();
 
             this._setLoadMoreVisible(!!this._nextCursor);
@@ -337,33 +331,26 @@ const sharedWithMeView = {
                 <i class="fas fa-exclamation-circle empty-state-icon error"></i>
                 <p>${i18n.t('errors_loadFailed', 'Failed to load items')}</p>
             `);
-            console.error('sharedWithMeView: load error', err);
+            console.error('recentView: load error', err);
         } finally {
             this._loading = false;
         }
     },
 
     /**
-     * Map `SharedWithMeItem[]` → a flat `(FileItem|FolderItem)[]` in
-     * **server-returned order**.  The order must be preserved so that
-     * swimlane grouping (group by owner / share date) works correctly when
-     * the server interleaves files and folders by the sort key.
+     * Map `RecentResourceItem[]` → a flat `(FileItem|FolderItem)[]` preserving
+     * server order. Sets `sort_date` (unix seconds) to the `accessed_at` date
+     * so the `accessedAt` keyFn can bucket by when the item was accessed.
      *
-     * Sets `owner_id` to `item.granted_by` so the component stamps
-     * `data-owner-id` with the granter's user ID automatically.
-     * Sets `sort_date` (unix seconds) to the grant date so the shareDate
-     * `keyFn` buckets by when the share was created, not the resource's
-     * own modification time.
-     *
-     * @param {SharedWithMeItem[]} items
+     * @param {RecentResourceItem[]} items
      * @returns {Array<FileItem|FolderItem>}
      */
     _mapItems(items) {
         /** @type {Array<FileItem|FolderItem>} */
         const result = [];
 
-        /** @param {string} iso @returns {number} */
-        const grantedAtSecs = (iso) => Math.floor(new Date(iso).getTime() / 1000);
+        /** @param {string} iso @returns {number} unix seconds */
+        const toSecs = (iso) => Math.floor(new Date(iso).getTime() / 1000);
 
         for (const item of items) {
             if (item.resource_type === 'folder') {
@@ -374,14 +361,15 @@ const sharedWithMeView = {
                         name: f.name,
                         path: f.path ?? '',
                         parent_id: f.parent_id ?? '',
-                        owner_id: item.granted_by,
+                        owner_id: f.owner_id ?? '',
                         is_root: f.is_root ?? false,
                         created_at: f.created_at,
                         modified_at: f.modified_at,
-                        sort_date: grantedAtSecs(item.granted_at),
+                        // sort_date = accessed_at (unix seconds) for the accessedAt keyFn
+                        sort_date: toSecs(item.accessed_at),
                         icon_class: f.icon_class,
                         icon_special_class: f.icon_special_class ?? '',
-                        category: 'folder'
+                        category: 'Folder'
                     })
                 );
             } else if (item.resource_type === 'file') {
@@ -392,13 +380,13 @@ const sharedWithMeView = {
                         name: f.name,
                         path: f.path ?? '',
                         folder_id: f.folder_id ?? '',
-                        owner_id: item.granted_by,
+                        owner_id: f.owner_id ?? '',
                         mime_type: f.mime_type,
                         size: f.size,
                         size_formatted: f.size_formatted,
                         created_at: f.created_at,
                         modified_at: f.modified_at,
-                        sort_date: grantedAtSecs(item.granted_at),
+                        sort_date: toSecs(item.accessed_at),
                         icon_class: f.icon_class,
                         icon_special_class: f.icon_special_class ?? '',
                         category: f.category
@@ -427,9 +415,9 @@ const sharedWithMeView = {
         wrapper.className = 'swm-load-more-wrapper hidden';
 
         const btn = document.createElement('button');
-        btn.id = 'swm-load-more';
+        btn.id = 'recent-load-more';
         btn.className = 'button secondary';
-        btn.textContent = i18n.t('sharedwithme_loadMore', 'Load more');
+        btn.textContent = i18n.t('recent.loadMore', 'Load more');
         btn.addEventListener('click', () => this._loadPage());
 
         wrapper.appendChild(btn);
@@ -445,4 +433,4 @@ const sharedWithMeView = {
     }
 };
 
-export { sharedWithMeView };
+export { recentView };

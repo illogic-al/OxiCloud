@@ -430,7 +430,8 @@
         "clear": "清除最近",
         "accessed": "訪問於",
         "empty_state": "沒有最近檔案",
-        "empty_hint": "您開啟的檔案將顯示在這裡"
+        "empty_hint": "您開啟的檔案將顯示在這裡",
+        "loadMore": "載入更多"
     },
     "batch": {
         "one_selected": "已選擇 1 個專案",
@@ -715,7 +716,14 @@
         "none": "無",
         "title": "分組方式",
         "owner": "擁有者",
-        "shareDate": "分享日期"
+        "shareDate": "分享日期",
+        "type": "類型",
+        "type.folders": "資料夾",
+        "accessedAt": "存取日期",
+        "modifiedAt": "修改日期",
+        "createdAt": "建立日期",
+        "size": "大小",
+        "favoriteDate": "收藏日期"
     },
     "dateBucket": {
         "today": "今天",

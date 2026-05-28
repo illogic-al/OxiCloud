@@ -430,7 +430,8 @@
         "clear": "Recente wissen",
         "accessed": "Geopend",
         "empty_state": "Geen recente bestanden",
-        "empty_hint": "Bestanden die je opent verschijnen hier"
+        "empty_hint": "Bestanden die je opent verschijnen hier",
+        "loadMore": "Meer laden"
     },
     "notifications": {
         "file_renamed": "Bestand hernoemd",
@@ -715,7 +716,14 @@
         "none": "Geen",
         "title": "Groeperen op",
         "owner": "Eigenaar",
-        "shareDate": "Deeldatum"
+        "shareDate": "Deeldatum",
+        "type": "Type",
+        "type.folders": "Mappen",
+        "accessedAt": "Toegangsdatum",
+        "modifiedAt": "Wijzigingsdatum",
+        "createdAt": "Aanmaakdatum",
+        "size": "Grootte",
+        "favoriteDate": "Favoritendatum"
     },
     "dateBucket": {
         "today": "Vandaag",

@@ -252,6 +252,11 @@ pub struct SharedWithMeQuery {
     /// Comma-separated resource types to include, e.g. `file,folder`.
     /// Omit to return all known types.
     pub resource_types: Option<String>,
+    /// Reverse the sort order. Default `false` (normal order).
+    /// Must be the same on all pages of the same result set — the cursor
+    /// carries this flag so the server can validate consistency.
+    #[serde(default)]
+    pub reverse: bool,
 }
 
 impl SharedWithMeQuery {

@@ -154,6 +154,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
+        # build.rs runs the deconflict pass and js_bundle_validate() — any
+        # duplicate declaration or parse error in the JS bundle fails here.
+      - name: Validate JS bundle (node --check)
+        # belt-and-suspenders: node --check parses the bundle without executing it.
+        # Catches SyntaxErrors that OXC's parse check inside build.rs would also
+        # catch, but gives a human-readable error line in the CI log.
+        run: node --check static-dist/js/app.*.js
       - uses: actions/upload-artifact@v4
         with:
           name: oxicloud-release

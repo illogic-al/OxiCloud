@@ -4,21 +4,24 @@
  * OxiCloud – Files section view.
  *
  * Orchestrates the main Files section:
- *   - Data fetching via `filesModel`
- *   - Rendering via a `ResourceListComponent` instance
+ *   - Data fetching via `filesModel` (cursor-paginated `/api/folders/{id}/resources`)
+ *   - Rendering via a `ResourceListComponent` instance with optional swimlane grouping
  *   - Drag-and-drop initialisation (delegated to `ui.initDragDrop`)
  *
- * Exports `loadFiles` (navigation & deep-link entry-point) and `addItem`
- * (post-upload / post-create optimistic UI updates used by fileOperations
- * and search).
+ * Exports:
+ *   - `loadFiles`   – navigation & deep-link entry-point
+ *   - `addItem`     – post-upload / post-create optimistic UI updates
+ *   - `filesView`   – group-by controller consumed by `navigation.js` / `main.js`
  */
 
 import { ResourceListComponent } from '../components/resourceList.js';
+import { normalizeDateBucket, sizeBucket } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
+import * as viewPrefs from '../core/viewPrefs.js';
 import { batchToolbar } from '../features/files/batchToolbar.js';
 import { inlineViewer } from '../features/files/inlineViewer.js';
 import { favorites } from '../features/library/favorites.js';
-import { fetchListing, rebuildBreadCrumb } from '../model/filesModel.js';
+import { fetchResourcesPage, rebuildBreadCrumb } from '../model/filesModel.js';
 import { grants } from '../model/grants.js';
 import { resolveHomeFolder } from './authSession.js';
 import { updateHistory } from './main.js';
@@ -28,11 +31,161 @@ import { uiNotifications } from './uiNotifications.js';
 
 /** @import {FileItem, FolderItem} from '../core/types.js' */
 
+/**
+ * @typedef {{ key: string, label: string, orderBy: string,
+ *             keyFn: (item: FileItem|FolderItem) => string|null,
+ *             labelFn?: (key: string) => string }} GroupByDef
+ */
+
+// ── Group-by dimension definitions ───────────────────────────────────────────
+
+/**
+ * Group-by dimension definitions for the Files section.
+ * Mirrors the same shape used by `sharedWithMeView.groupByDefs` so `main.js`
+ * can drive the group-by dropdown generically.
+ *
+ * @type {GroupByDef[]}
+ */
+const GROUP_BY_DEFS = [
+    {
+        key: 'type',
+        get label() {
+            return i18n.t('groupby.type', 'Type');
+        },
+        orderBy: 'type',
+        // Folders → 'Folder'; files → their pre-computed category string.
+        keyFn: (item) => ('mime_type' in item ? /** @type {Record<string,string>} */ (/** @type {unknown} */ (item)).category || 'other' : 'Folder'),
+        labelFn: (key) => {
+            // biome-ignore format: keep indentation
+            /** @type {Record<string, string>} */
+            const labels = {
+                Folder:       i18n.t('groupby.type.folders',     'Folders'),
+                Image:        i18n.t('category.images',          'Images'),
+                Video:        i18n.t('category.videos',          'Videos'),
+                Audio:        i18n.t('category.audio',           'Audio'),
+                PDF:          'PDF',
+                Document:     i18n.t('category.documents',       'Documents'),
+                Spreadsheet:  i18n.t('category.spreadsheets',    'Spreadsheets'),
+                Presentation: i18n.t('category.presentations',   'Presentations'),
+                Archive:      i18n.t('category.archives',        'Archives'),
+                Code:         i18n.t('category.code',            'Code'),
+                Markdown:     i18n.t('category.markdown',        'Markdown'),
+                Text:         i18n.t('category.text',            'Text'),
+                Installer:    i18n.t('category.installers',      'Installers')
+            };
+            return labels[key] ?? key;
+        }
+    },
+    {
+        key: 'size',
+        get label() {
+            return i18n.t('groupby.size', 'Size');
+        },
+        orderBy: 'size',
+        // sizeBucket(-1) → "Folders" sentinel; no labelFn needed.
+        keyFn: (item) => {
+            if (!('mime_type' in item)) return sizeBucket(-1);
+            const r = /** @type {Record<string, number>} */ (/** @type {unknown} */ (item));
+            return sizeBucket(r.size ?? 0);
+        }
+    },
+    {
+        key: 'modifiedAt',
+        get label() {
+            return i18n.t('groupby.modifiedAt', 'Modified date');
+        },
+        orderBy: 'modified_at',
+        // keyFn returns the human-readable bucket; the bucket IS the key.
+        keyFn: (item) => {
+            const r = /** @type {Record<string, number>} */ (/** @type {unknown} */ (item));
+            return r.modified_at ? normalizeDateBucket(r.modified_at) : null;
+        }
+    },
+    {
+        key: 'createdAt',
+        get label() {
+            return i18n.t('groupby.createdAt', 'Created date');
+        },
+        orderBy: 'created_at',
+        keyFn: (item) => {
+            const r = /** @type {Record<string, number>} */ (/** @type {unknown} */ (item));
+            return r.created_at ? normalizeDateBucket(r.created_at) : null;
+        }
+    }
+];
+
+// ── Module-level state ────────────────────────────────────────────────────────
+
+/** ID of the "Load more" wrapper injected below `.files-container`. */
+const LOAD_MORE_ID = 'files-load-more-wrapper';
+
 /** @type {ResourceListComponent|null} */
 let _component = null;
 
-/** Guard against concurrent `loadFiles` calls. */
+/** Guard against concurrent `_loadPage` calls. */
 let _loading = false;
+
+/** Opaque cursor for the next page; `null` on first page or when exhausted. */
+let _nextCursor = /** @type {string|null} */ (null);
+
+/**
+ * Active group-by key: '' = no grouping (name order), or one of the keys
+ * from GROUP_BY_DEFS.
+ * @type {string}
+ */
+let _groupBy = '';
+
+/** Whether the current sort order is reversed. */
+let _reversed = false;
+
+// ── Group-by controller (public API, consumed by navigation.js / main.js) ───
+
+/**
+ * Controller object registered with `setGroupByView()` by navigation.js when
+ * the Files section is active.  Exposes the same interface as
+ * `sharedWithMeView` so the generic group-by infrastructure in `main.js`
+ * drives both sections identically.
+ */
+const filesView = {
+    /**
+     * The group-by dimension definitions for this section.
+     * `main.js` reads this to populate the Group-by dropdown dynamically.
+     * @returns {GroupByDef[]}
+     */
+    get groupByDefs() {
+        return GROUP_BY_DEFS;
+    },
+
+    /**
+     * Change the active group-by dimension and reload from page 1.
+     * Calling with the current key is a no-op.
+     * @param {string} key  '' | 'type' | 'modifiedAt' | 'createdAt' | 'size'
+     */
+    setGroupBy(key) {
+        if (_groupBy === key) return;
+        _groupBy = key;
+        viewPrefs.save('files', _groupBy, _reversed, viewPrefs.load('files').view);
+        _nextCursor = null;
+        _component?.clear();
+        _loadPage({ isFirstPage: true });
+    },
+
+    /**
+     * Flip the sort direction and reload from page 1.
+     * Calling with the current value is a no-op.
+     * @param {boolean} reversed
+     */
+    setDirection(reversed) {
+        if (_reversed === reversed) return;
+        _reversed = reversed;
+        viewPrefs.save('files', _groupBy, _reversed, viewPrefs.load('files').view);
+        _nextCursor = null;
+        _component?.clear();
+        _loadPage({ isFirstPage: true });
+    }
+};
+
+// ── Component factory ─────────────────────────────────────────────────────────
 
 /**
  * Return (creating on first call) the `ResourceListComponent` bound to
@@ -58,7 +211,7 @@ function _ensureComponent() {
                 const isFile = 'mime_type' in item;
                 const type = isFile ? 'file' : 'folder';
                 if (favorites.isFavorite(item.id, type)) {
-                    await favorites.removeFromFavorites(item.id, type);
+                    await favorites.removeFromFavorites(item.id, type, item.name);
                     _component?.setFavoriteVisualState(item.id, type, false);
                 } else {
                     await favorites.addToFavorites(item.id, item.name, type, null);
@@ -85,8 +238,98 @@ function _ensureComponent() {
         ui.initDragDrop(/** @type {HTMLElement} */ (filesList));
     }
 
+    _ensureLoadMoreButton();
+
     return _component;
 }
+
+// ── "Load more" button ────────────────────────────────────────────────────────
+
+/**
+ * Create the "Load more" wrapper once and attach it below `.files-container`.
+ * Subsequent calls are no-ops.
+ */
+function _ensureLoadMoreButton() {
+    if (document.getElementById(LOAD_MORE_ID)) return;
+
+    const filesContainer = document.querySelector('.files-container');
+    if (!filesContainer) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.id = LOAD_MORE_ID;
+    wrapper.className = 'swm-load-more-wrapper hidden';
+
+    const btn = document.createElement('button');
+    btn.id = 'files-load-more';
+    btn.className = 'button secondary';
+    btn.textContent = i18n.t('files.loadMore', 'Load more');
+    btn.addEventListener('click', () => {
+        _loadPage({ isFirstPage: false });
+    });
+
+    wrapper.appendChild(btn);
+    filesContainer.after(wrapper);
+}
+
+/**
+ * @param {boolean} visible
+ */
+function _setLoadMoreVisible(visible) {
+    const w = document.getElementById(LOAD_MORE_ID);
+    if (w) w.classList.toggle('hidden', !visible);
+}
+
+// ── Page loader ───────────────────────────────────────────────────────────────
+
+/**
+ * Fetch one cursor page and render it.
+ * @param {{ isFirstPage?: boolean }} [opts]
+ * @returns {Promise<void>}
+ */
+async function _loadPage({ isFirstPage = false } = {}) {
+    if (_loading) return;
+    _loading = true;
+
+    try {
+        const def = GROUP_BY_DEFS.find((d) => d.key === _groupBy);
+        const orderBy = def?.orderBy ?? 'name';
+
+        const { items, nextCursor } = await fetchResourcesPage(app.currentPath, {
+            cursor: _nextCursor,
+            orderBy,
+            limit: 50,
+            reverse: _reversed
+        });
+
+        _nextCursor = nextCursor;
+
+        if (items.length === 0 && isFirstPage) {
+            ui.showEmptyList();
+            _setLoadMoreVisible(false);
+            return;
+        }
+
+        if (isFirstPage) {
+            _component?.render(items, def?.keyFn, def?.labelFn);
+        } else {
+            _component?.append(items, def?.keyFn, def?.labelFn);
+        }
+
+        await _component?.resolveOwnerCells();
+        _setLoadMoreVisible(!!nextCursor);
+    } catch (/** @type {any} */ err) {
+        if (err?.status === 403) {
+            ui.showError(`<p>${i18n.t('errors.forbidden', 'Could not load files')}</p>`);
+        } else {
+            console.error('filesView: load error', err);
+            uiNotifications.show('Error', 'Could not load files and folders');
+        }
+    } finally {
+        _loading = false;
+    }
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
 
 /**
  * Append a single item to the current view (post-upload / post-create
@@ -111,14 +354,19 @@ function addItem(item) {
  *
  * @param {Object}  [options]
  * @param {boolean} [options.insertHistory=true]
- * @param {boolean} [options.forceRefresh=false]
+ * @param {boolean} [options.forceRefresh=false]  (legacy — kept for callers; ignored internally)
  */
 async function loadFiles(options = { insertHistory: true }) {
     if (_loading) {
         console.log('A file load is already in progress, ignoring request');
         return;
     }
-    _loading = true;
+
+    // Reset cursor on navigation; restore saved group-by/direction preferences.
+    _nextCursor = null;
+    const _savedPrefs = viewPrefs.load('files');
+    _groupBy = _savedPrefs.groupBy;
+    _reversed = _savedPrefs.reversed;
 
     // Delay spinner so fast loads avoid the flash
     const spinnerTimeout = setTimeout(() => {
@@ -129,6 +377,10 @@ async function loadFiles(options = { insertHistory: true }) {
             </div>
         `);
     }, 100);
+
+    // A temporary guard: _loadPage sets _loading itself, but we need to
+    // block re-entrant loadFiles() calls during the setup below.
+    _loading = true;
 
     try {
         if (!app.userHomeFolderId) await resolveHomeFolder();
@@ -148,10 +400,6 @@ async function loadFiles(options = { insertHistory: true }) {
         ui.updateBreadcrumb();
         updateHistory(options.insertHistory ?? true);
 
-        const { folders, files } = await fetchListing(app.currentPath, {
-            forceRefresh: options.forceRefresh ?? false
-        });
-
         clearTimeout(spinnerTimeout);
 
         // Prepare the container (shows #files-list, hides error panel)
@@ -164,23 +412,31 @@ async function loadFiles(options = { insertHistory: true }) {
         batchToolbar.init();
         batchToolbar.setActiveComponent(component);
 
-        if (folders.length === 0 && files.length === 0) {
-            ui.showEmptyList();
-        } else {
-            component.render([...folders, ...files]);
-            await component.resolveOwnerCells();
-        }
+        // Hand off to _loadPage (re-use cursor/groupBy state just reset above).
+        _loading = false; // _loadPage sets its own guard
+        await _loadPage({ isFirstPage: true });
 
-        console.log(`Loaded ${folders.length} folders and ${files.length} files`);
-
-        // Deep-link: open a specific file if requested via app.viewFile
+        // Deep-link: open a specific file if requested via app.viewFile.
+        // We don't have a flat file list anymore (cursor pages), so only try
+        // to open it if it was already rendered (first page).
         if (app.viewFile) {
-            const fileFound = files.find((f) => f.id === app.viewFile) ?? null;
-            if (fileFound) {
-                console.log(`file ${app.viewFile} found, calling viewer`);
-                await inlineViewer.openFile(fileFound);
+            // Find the item among all rendered cards via the DOM attribute.
+            const rendered = document.querySelector(`[data-id="${app.viewFile}"][data-type="file"]`);
+            if (rendered) {
+                // The component's item list may be sparse; ask for a fresh fetch.
+                const fileRes = await fetch(`/api/files/${app.viewFile}`, {
+                    credentials: 'same-origin',
+                    cache: 'no-store'
+                });
+                if (fileRes.ok) {
+                    const fileFound = /** @type {FileItem} */ (await fileRes.json());
+                    await inlineViewer.openFile(fileFound);
+                } else {
+                    app.viewFile = null;
+                    updateHistory(false);
+                }
             } else {
-                console.log(`file ${app.viewFile} not found`);
+                console.log(`file ${app.viewFile} not in first page — skipping auto-open`);
                 app.viewFile = null;
                 updateHistory(false);
             }
@@ -198,4 +454,4 @@ async function loadFiles(options = { insertHistory: true }) {
     }
 }
 
-export { addItem, loadFiles };
+export { addItem, filesView, loadFiles };

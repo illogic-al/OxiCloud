@@ -285,6 +285,10 @@ pub struct GrantCursor {
     /// - `"size"`  — file size in bytes (-1 = Folder sentinel)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_int: Option<i64>,
+    /// Whether the result set was reversed when this cursor was produced.
+    /// Must be passed unchanged on subsequent page requests.
+    #[serde(default)]
+    pub reverse: bool,
 }
 
 impl GrantCursor {

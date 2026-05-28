@@ -430,7 +430,8 @@
         "clear": "Limpiar recientes",
         "accessed": "Accedido",
         "empty_state": "No hay archivos recientes",
-        "empty_hint": "Los archivos que abras aparecerán aquí"
+        "empty_hint": "Los archivos que abras aparecerán aquí",
+        "loadMore": "Cargar más"
     },
     "notifications": {
         "file_renamed": "Archivo renombrado",
@@ -715,7 +716,14 @@
         "none": "Ninguno",
         "title": "Agrupar por",
         "owner": "Propietario",
-        "shareDate": "Fecha de compartición"
+        "shareDate": "Fecha de compartición",
+        "type": "Tipo",
+        "type.folders": "Carpetas",
+        "accessedAt": "Fecha de acceso",
+        "modifiedAt": "Fecha de modificación",
+        "createdAt": "Fecha de creación",
+        "size": "Tamaño",
+        "favoriteDate": "Fecha de favorito"
     },
     "dateBucket": {
         "today": "Hoy",

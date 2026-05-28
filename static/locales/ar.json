@@ -430,7 +430,8 @@
         "clear": "مسح الأخيرة",
         "accessed": "تم الوصول",
         "empty_state": "لا توجد ملفات حديثة",
-        "empty_hint": "الملفات التي تفتحها ستظهر هنا"
+        "empty_hint": "الملفات التي تفتحها ستظهر هنا",
+        "loadMore": "تحميل المزيد"
     },
     "notifications": {
         "file_renamed": "تمت إعادة تسمية الملف",
@@ -715,7 +716,14 @@
         "none": "لا شيء",
         "title": "التجميع حسب",
         "owner": "المالك",
-        "shareDate": "تاريخ المشاركة"
+        "shareDate": "تاريخ المشاركة",
+        "type": "النوع",
+        "type.folders": "المجلدات",
+        "accessedAt": "تاريخ الوصول",
+        "modifiedAt": "تاريخ التعديل",
+        "createdAt": "تاريخ الإنشاء",
+        "size": "الحجم",
+        "favoriteDate": "تاريخ المفضلة"
     },
     "dateBucket": {
         "today": "اليوم",

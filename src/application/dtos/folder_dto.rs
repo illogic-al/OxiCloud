@@ -1,8 +1,13 @@
 use std::sync::Arc;
 
+use crate::application::dtos::cursor::{CursorListResponse, CursorQuery, PageCursor};
+use crate::application::dtos::grant_dto::{ResourceContentDto, ResourceTypeDto};
 use crate::domain::entities::folder::Folder;
+use crate::domain::services::authorization::ResourceKind;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
+use uuid::Uuid;
 
 /// DTO for folder creation requests
 #[derive(Debug, Deserialize, ToSchema)]
@@ -145,3 +150,138 @@ impl Default for FolderDto {
         Self::empty()
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Cursor-paginated folder resources  (GET /api/folders/{id}/resources)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Raw row returned by the UNION ALL query that combines `storage.folders` and
+/// `storage.files` for a given parent folder.  Used internally between the
+/// repository and service/handler layers — never serialised directly.
+pub struct FolderResourceRow {
+    pub resource_type: String, // "folder" | "file"
+    pub id: Uuid,
+    pub name: String,
+    /// Parent folder UUID (for both resource types).
+    pub parent_id: Option<Uuid>,
+    /// `None` for folders.
+    pub mime_type: Option<String>,
+    /// `-1` sentinel for folders (no physical size).
+    pub size: i64,
+    pub created_at: DateTime<Utc>,
+    pub modified_at: DateTime<Utc>,
+    pub owner_id: Uuid,
+    // Pre-computed sort fields — returned by the SQL for cursor construction.
+    /// `LOWER(name)` used by `name`/`type` sorts.
+    pub sort_str: String,
+    /// `category_order` for files, `0` for folders.
+    pub type_order: i64,
+    /// `0` for folders, `1` for files (used by `name` sort to keep folders first).
+    pub folder_first: i32,
+}
+
+/// Opaque keyset-pagination cursor for `/api/folders/{id}/resources`.
+///
+/// Encoded as base64url-JSON (same scheme as [`GrantCursor`]).
+/// Fields are sparse: only the sort-relevant ones are serialised.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderResourceCursor {
+    /// Sort dimension active when this cursor was produced.
+    #[serde(default = "FolderResourceCursor::default_order")]
+    pub order_by: String,
+    /// UUID of the last item on the previous page (tie-breaker).
+    pub resource_id: Uuid,
+    /// `LOWER(name)` for `name`/`type` sorts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_str: Option<String>,
+    /// Multipurpose integer sort key:
+    /// - `name`:  `folder_first` (0 = folder, 1 = file)
+    /// - `type`:  `category_order` (0 = Folder, 100 = Image …)
+    /// - `size`:  file size in bytes, -1 for folders
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_int: Option<i64>,
+    /// Timestamp for `modified_at` / `created_at` sorts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_ts: Option<DateTime<Utc>>,
+    /// Whether the result set was reversed when this cursor was produced.
+    /// Must be passed unchanged on subsequent page requests.
+    #[serde(default)]
+    pub reverse: bool,
+}
+
+impl FolderResourceCursor {
+    fn default_order() -> String {
+        "name".to_owned()
+    }
+}
+
+impl PageCursor for FolderResourceCursor {}
+
+/// Query parameters for `GET /api/folders/{id}/resources`.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct FolderResourcesQuery {
+    /// Maximum items per page (1–200, default 50).
+    #[serde(default = "CursorQuery::default_limit")]
+    pub limit: u32,
+    /// Opaque cursor from a previous response. Omit to start from the top.
+    pub cursor: Option<String>,
+    /// Sort / group-by dimension. Supported: `"name"` (default), `"type"`,
+    /// `"modified_at"`, `"created_at"`, `"size"`.
+    pub order_by: Option<String>,
+    /// Comma-separated resource types to include, e.g. `"file,folder"`.
+    /// Omit to include both.
+    pub resource_types: Option<String>,
+    /// Reverse the sort order. Default `false` (normal order).
+    /// Must be the same on all pages of the same result set — the cursor
+    /// carries this flag so the server can validate consistency.
+    #[serde(default)]
+    pub reverse: bool,
+}
+
+impl FolderResourcesQuery {
+    /// Returns `limit` clamped to `[1, 200]`.
+    pub fn limit_clamped(&self) -> usize {
+        self.limit.clamp(1, 200) as usize
+    }
+
+    /// Decode the optional cursor string. Invalid cursor → start from top.
+    pub fn decode_cursor(&self) -> Option<FolderResourceCursor> {
+        self.cursor
+            .as_deref()
+            .and_then(FolderResourceCursor::decode)
+    }
+
+    /// Parse `resource_types` into a `Vec<ResourceKind>`.
+    /// Returns `None` when the field is absent (= include all types).
+    pub fn resource_kinds(&self) -> Option<Vec<ResourceKind>> {
+        self.resource_types.as_deref().map(|s| {
+            s.split(',')
+                .filter_map(|t| ResourceKind::parse(t.trim()))
+                .collect()
+        })
+    }
+}
+
+/// Options for [`FolderService::list_resources_paged_with_perms`].
+///
+/// Groups the optional parameters so the function stays within clippy's
+/// `too_many_arguments` limit while remaining easy to extend.
+pub struct ListResourcesOptions<'a> {
+    pub limit: usize,
+    pub cursor: Option<FolderResourceCursor>,
+    pub order_by: &'a str,
+    pub kinds: Option<&'a [ResourceKind]>,
+    pub reverse: bool,
+}
+
+/// One item in a `/resources` page — a file or folder with a `resource_type` tag.
+/// Re-uses [`ResourceContentDto`] so the shape is identical to `SharedWithMeItemDto.resource`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FolderResourceItemDto {
+    pub resource_type: ResourceTypeDto,
+    /// Full resource details. Shape is determined by `resource_type`.
+    pub resource: ResourceContentDto,
+}
+
+/// Response envelope for `GET /api/folders/{id}/resources`.
+pub type FolderResourcesDto = CursorListResponse<FolderResourceItemDto>;

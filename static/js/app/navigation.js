@@ -3,15 +3,18 @@
  * Extracted from main.js to keep navigation concerns isolated.
  */
 
+import { applyGroupByMenuState } from '../core/groupBySync.js';
 import { i18n } from '../core/i18n.js';
+import * as viewPrefs from '../core/viewPrefs.js';
 import { batchToolbar } from '../features/files/batchToolbar.js';
 import { favorites } from '../features/library/favorites.js';
 import { musicView } from '../features/library/music.js';
 import { photosView } from '../features/library/photos.js';
-import { recent } from '../features/library/recent.js';
+import { favoritesView } from '../views/favorites/favoritesView.js';
+import { recentView } from '../views/recent/recentView.js';
 import { sharedView } from '../views/shared/sharedView.js';
 import { sharedWithMeView } from '../views/sharedWithMe/sharedWithMeView.js';
-import { loadFiles } from './filesView.js';
+import { filesView, loadFiles } from './filesView.js';
 import { setActionsBarMode, setGroupByView, syncGroupByMenu } from './main.js';
 import { app, appElements } from './state.js';
 import { loadTrashItems } from './trashView.js';
@@ -21,6 +24,14 @@ import { ui } from './ui.js';
  * Sync the hidden class and inline display for the grid/list containers
  * based on the current view preference.
  */
+/**
+ * Restore the grid/list view preference for a section before rendering.
+ * @param {string} section  Matches `app.currentSection` values.
+ */
+function restoreView(section) {
+    app.currentView = viewPrefs.resolveView(section);
+}
+
 function syncViewContainers() {
     const filesList = document.getElementById('files-list');
     const gridViewBtn = document.getElementById('grid-view-btn');
@@ -164,6 +175,16 @@ function setCurrentSection(section) {
         sharedWithMeView.hide();
     }
 
+    // Hide favoritesView "Load more" button when leaving the favorites section
+    if (section !== 'favorites' && favoritesView) {
+        favoritesView.hide();
+    }
+
+    // Hide recentView "Load more" button when leaving the recent section
+    if (section !== 'recent' && recentView) {
+        recentView.hide();
+    }
+
     // Reset owner column — sections that need it re-enable it explicitly below.
     ui.setOwnerColumnVisible(false);
 
@@ -219,11 +240,16 @@ function switchToSharedWithMeSection() {
     setGroupByView(sharedWithMeView);
     syncGroupByMenu(sharedWithMeView.groupByDefs);
 
+    // Restore the saved group-by selection in the dropdown.
+    const swmPrefs = viewPrefs.load('sharedwithme');
+    applyGroupByMenuState(swmPrefs.groupBy, swmPrefs.reversed);
+
     // Show the Owner column — names are resolved async after render.
     ui.setOwnerColumnVisible(true);
 
     // Show the standard files container and respect grid/list preference
     toggleFileContainer(true);
+    restoreView('sharedwithme');
     syncViewContainers();
 
     if (batchToolbar) batchToolbar.clear();
@@ -237,8 +263,12 @@ function switchToFilesSection() {
 
     // Set actions bar mode
     setActionsBarMode('files', true);
-    setGroupByView(null);
-    syncGroupByMenu([]);
+    setGroupByView(filesView);
+    syncGroupByMenu(filesView.groupByDefs);
+
+    // Restore the saved group-by selection in the dropdown.
+    const filesPrefs = viewPrefs.load('files');
+    applyGroupByMenuState(filesPrefs.groupBy, filesPrefs.reversed);
 
     // Show owner column in the Files section
     ui.setOwnerColumnVisible(true);
@@ -251,6 +281,7 @@ function switchToFilesSection() {
     toggleFileContainer(true);
 
     // ensure correct view
+    restoreView('files');
     syncViewContainers();
 
     //reset files view + remove any error
@@ -273,8 +304,12 @@ function switchToFavoritesSection() {
 
     // Set actions bar mode
     setActionsBarMode('favorites');
-    setGroupByView(null);
-    syncGroupByMenu([]);
+    setGroupByView(favoritesView);
+    syncGroupByMenu(favoritesView.groupByDefs);
+
+    // Restore the saved group-by selection in the dropdown.
+    const favPrefs = viewPrefs.load('favorites');
+    applyGroupByMenuState(favPrefs.groupBy, favPrefs.reversed);
 
     // Show the Owner column — names are resolved async after render.
     ui.setOwnerColumnVisible(true);
@@ -287,34 +322,32 @@ function switchToFavoritesSection() {
     toggleFileContainer(true);
 
     // ensure correct view
+    restoreView('favorites');
     syncViewContainers();
 
-    //reset files view + remove any error
-    ui.resetFilesList();
-
-    if (favorites) {
-        // temp solution
-        sharedView.loadItems().then(() => {
-            favorites.displayFavorites();
-        });
-    } else {
-        console.error('Favorites module not loaded or initialized');
-        ui.showError(`
-                <i class="fas fa-exclamation-circle empty-state-icon error"></i>
-                <p>Error loading the favorites module</p>
-            `);
-    }
-
     if (batchToolbar) batchToolbar.clear();
+
+    // Prefetch isFavorite cache in background (non-blocking)
+    favorites.init();
+
+    // Load and render via the cursor-paginated view
+    favoritesView.init();
 }
 
 function switchToRecentFilesSection() {
     if (!setCurrentSection('recent')) return;
 
-    // Set actions bar mode
+    // Set actions bar mode with group-by support
     setActionsBarMode('recent');
-    setGroupByView(null);
-    syncGroupByMenu([]);
+    setGroupByView(recentView);
+    syncGroupByMenu(recentView.groupByDefs);
+
+    // Restore the saved group-by selection in the dropdown.
+    const recentPrefs = viewPrefs.load('recent');
+    applyGroupByMenuState(recentPrefs.groupBy, recentPrefs.reversed);
+
+    // Show the Owner column
+    ui.setOwnerColumnVisible(true);
 
     // Hide breadcrumb (only shown in Files view)
     const breadcrumb = document.querySelector('.breadcrumb');
@@ -324,23 +357,12 @@ function switchToRecentFilesSection() {
     toggleFileContainer(true);
 
     // ensure correct view
+    restoreView('recent');
     syncViewContainers();
 
-    //reset files view + remove any error
-    ui.resetFilesList();
-
-    if (recent) {
-        sharedView.loadItems().then(() => {
-            recent.displayRecentFiles();
-        });
-    } else {
-        console.error('Recent files module not loaded or initialized');
-        ui.showError(`
-                <i class="fas fa-exclamation-circle empty-state-icon error"></i>
-                <p>Error loading the recent module</p>
-            `);
-    }
     if (batchToolbar) batchToolbar.clear();
+
+    recentView.init();
 }
 
 function switchToPhotosSection() {
@@ -385,6 +407,7 @@ function switchToTrashSection() {
     ui.resetFilesList();
 
     //ensure buttons match the current view
+    restoreView('trash');
     syncViewContainers();
 
     // Load trash items
@@ -432,8 +455,8 @@ function switchToMusicSection() {
 function activateFilesUI() {
     setCurrentSection('files');
     setActionsBarMode('files', true);
-    setGroupByView(null);
-    syncGroupByMenu([]);
+    setGroupByView(filesView);
+    syncGroupByMenu(filesView.groupByDefs);
     const breadcrumb = document.querySelector('.breadcrumb');
     breadcrumb?.classList.remove('hidden');
     toggleFileContainer(true);

@@ -300,6 +300,7 @@ impl AuthorizationEngine for PgAclEngine {
         limit: u32,
         cursor: Option<GrantCursor>,
         sort_by: &str,
+        reverse: bool,
     ) -> Result<(Vec<IncomingGrantSummary>, Option<GrantCursor>), DomainError> {
         // ── Common setup ──────────────────────────────────────────────────────
         let kind_strs: Option<Vec<&str>> = if kinds.is_empty() {
@@ -358,6 +359,7 @@ impl AuthorizationEngine for PgAclEngine {
         // ── Build sort-specific SQL fragments ─────────────────────────────────
         // "name" and "type" share the same LEFT JOINs; only sort_int_expr,
         // the cursor WHERE condition, and ORDER BY differ.
+        // Each branch emits two variants selected by `reverse`.
         let sql = match sort_by {
             "name" | "type" => {
                 let sort_int_expr = if sort_by == "type" {
@@ -365,20 +367,39 @@ impl AuthorizationEngine for PgAclEngine {
                 } else {
                     "NULL::bigint"
                 };
-                let where_clause = if sort_by == "type" {
-                    r#"(  $5::integer IS NULL
-                       OR sort_int > $5
-                       OR (sort_int = $5 AND LOWER(sort_str) > $4)
-                       OR (sort_int = $5 AND LOWER(sort_str) = $4 AND resource_id > $7::uuid))"#
+                // Normal vs reversed keyset + ORDER BY.
+                let (where_clause, order_clause) = if sort_by == "type" {
+                    if reverse {
+                        (
+                            r#"(  $5::integer IS NULL
+                               OR sort_int < $5
+                               OR (sort_int = $5 AND LOWER(sort_str) < $4)
+                               OR (sort_int = $5 AND LOWER(sort_str) = $4 AND resource_id < $7::uuid))"#,
+                            "sort_int DESC, LOWER(sort_str) DESC, resource_id DESC",
+                        )
+                    } else {
+                        (
+                            r#"(  $5::integer IS NULL
+                               OR sort_int > $5
+                               OR (sort_int = $5 AND LOWER(sort_str) > $4)
+                               OR (sort_int = $5 AND LOWER(sort_str) = $4 AND resource_id > $7::uuid))"#,
+                            "sort_int ASC, LOWER(sort_str) ASC, resource_id ASC",
+                        )
+                    }
+                } else if reverse {
+                    (
+                        r#"(  $4::text IS NULL
+                           OR LOWER(sort_str) < $4
+                           OR (LOWER(sort_str) = $4 AND resource_id < $7::uuid))"#,
+                        "LOWER(sort_str) DESC, resource_id DESC",
+                    )
                 } else {
-                    r#"(  $4::text IS NULL
-                       OR LOWER(sort_str) > $4
-                       OR (LOWER(sort_str) = $4 AND resource_id > $7::uuid))"#
-                };
-                let order_clause = if sort_by == "type" {
-                    "sort_int ASC, LOWER(sort_str) ASC, resource_id ASC"
-                } else {
-                    "LOWER(sort_str) ASC, resource_id ASC"
+                    (
+                        r#"(  $4::text IS NULL
+                           OR LOWER(sort_str) > $4
+                           OR (LOWER(sort_str) = $4 AND resource_id > $7::uuid))"#,
+                        "LOWER(sort_str) ASC, resource_id ASC",
+                    )
                 };
                 format!(
                     r#"WITH {AGG},
@@ -400,64 +421,112 @@ impl AuthorizationEngine for PgAclEngine {
                     LIMIT $8"#
                 )
             }
-            "granted_by" => format!(
+            "granted_by" => {
                 // Joins auth.users to sort alphabetically by username.
                 // Cursor encodes (owner_name=$4, granted_at=$6, resource_id=$7).
-                r#"WITH {AGG},
-                owner_named AS (
-                    SELECT agg.*,
-                        LOWER(u.username) AS sort_str,
-                        NULL::bigint AS sort_int
-                    FROM agg
-                    LEFT JOIN auth.users u ON u.id = agg.granted_by
+                let (where_clause, order_clause) = if reverse {
+                    (
+                        r#"(  $4::text IS NULL
+                          OR sort_str < $4
+                          OR (sort_str = $4 AND (
+                                  $6::timestamptz IS NULL
+                               OR granted_at > $6
+                               OR (granted_at = $6 AND resource_id > $7::uuid))))"#,
+                        "sort_str DESC, granted_at ASC, resource_id ASC",
+                    )
+                } else {
+                    (
+                        r#"(  $4::text IS NULL
+                          OR sort_str > $4
+                          OR (sort_str = $4 AND (
+                                  $6::timestamptz IS NULL
+                               OR granted_at < $6
+                               OR (granted_at = $6 AND resource_id < $7::uuid))))"#,
+                        "sort_str ASC, granted_at DESC, resource_id DESC",
+                    )
+                };
+                format!(
+                    r#"WITH {AGG},
+                    owner_named AS (
+                        SELECT agg.*,
+                            LOWER(u.username) AS sort_str,
+                            NULL::bigint AS sort_int
+                        FROM agg
+                        LEFT JOIN auth.users u ON u.id = agg.granted_by
+                    )
+                    SELECT resource_type, resource_id, permissions, granted_at, granted_by, sort_str, sort_int
+                    FROM owner_named
+                    WHERE {where_clause}
+                    ORDER BY {order_clause}
+                    LIMIT $8"#
                 )
-                SELECT resource_type, resource_id, permissions, granted_at, granted_by, sort_str, sort_int
-                FROM owner_named
-                WHERE (  $4::text IS NULL
-                      OR sort_str > $4
-                      OR (sort_str = $4 AND (
-                              $6::timestamptz IS NULL
-                           OR granted_at < $6
-                           OR (granted_at = $6 AND resource_id < $7::uuid))))
-                ORDER BY sort_str ASC, granted_at DESC, resource_id DESC
-                LIMIT $8"#
-            ),
-            "size" => format!(
-                // Folders have no size — they sort first with a sentinel of -1.
-                // Files sort by size ASC; resource_id breaks ties.
+            }
+            "size" => {
+                // Folders have no size — sentinel -1 (sorts first ASC, last DESC).
                 // Cursor encodes (sort_int=$5, resource_id=$7); $4/$6 unused.
-                r#"WITH {AGG},
-                sized AS (
-                    SELECT agg.*,
-                        NULL::text AS sort_str,
-                        CASE WHEN agg.resource_type = 'folder' THEN -1
-                             ELSE fi.size
-                        END AS sort_int
-                    FROM agg
-                    LEFT JOIN storage.files fi ON fi.id = agg.resource_id AND agg.resource_type = 'file'
+                let (where_clause, order_clause) = if reverse {
+                    (
+                        r#"(  $5::bigint IS NULL
+                          OR sort_int < $5
+                          OR (sort_int = $5 AND resource_id < $7::uuid))"#,
+                        "sort_int DESC, resource_id DESC",
+                    )
+                } else {
+                    (
+                        r#"(  $5::bigint IS NULL
+                          OR sort_int > $5
+                          OR (sort_int = $5 AND resource_id > $7::uuid))"#,
+                        "sort_int ASC, resource_id ASC",
+                    )
+                };
+                format!(
+                    r#"WITH {AGG},
+                    sized AS (
+                        SELECT agg.*,
+                            NULL::text AS sort_str,
+                            CASE WHEN agg.resource_type = 'folder' THEN -1
+                                 ELSE fi.size
+                            END AS sort_int
+                        FROM agg
+                        LEFT JOIN storage.files fi ON fi.id = agg.resource_id AND agg.resource_type = 'file'
+                    )
+                    SELECT resource_type, resource_id, permissions, granted_at, granted_by, sort_str, sort_int
+                    FROM sized
+                    WHERE {where_clause}
+                    ORDER BY {order_clause}
+                    LIMIT $8"#
                 )
-                SELECT resource_type, resource_id, permissions, granted_at, granted_by, sort_str, sort_int
-                FROM sized
-                WHERE (  $5::bigint IS NULL
-                      OR sort_int > $5
-                      OR (sort_int = $5 AND resource_id > $7::uuid))
-                ORDER BY sort_int ASC, resource_id ASC
-                LIMIT $8"#
-            ),
-            _ => format!(
-                // Default: sort by grant date DESC (newest first).
+            }
+            _ => {
+                // Default: sort by grant date.
+                // Normal = DESC (newest first); reversed = ASC (oldest first).
                 // Cursor encodes (granted_at=$6, resource_id=$7); $4/$5 unused.
-                r#"WITH {AGG}
-                SELECT resource_type, resource_id, permissions, granted_at, granted_by,
-                       NULL::text   AS sort_str,
-                       NULL::bigint AS sort_int
-                FROM agg
-                WHERE (  $6::timestamptz IS NULL
-                      OR granted_at < $6
-                      OR (granted_at = $6 AND resource_id < $7::uuid))
-                ORDER BY granted_at DESC, resource_id DESC
-                LIMIT $8"#
-            ),
+                let (where_clause, order_clause) = if reverse {
+                    (
+                        r#"(  $6::timestamptz IS NULL
+                          OR granted_at > $6
+                          OR (granted_at = $6 AND resource_id > $7::uuid))"#,
+                        "granted_at ASC, resource_id ASC",
+                    )
+                } else {
+                    (
+                        r#"(  $6::timestamptz IS NULL
+                          OR granted_at < $6
+                          OR (granted_at = $6 AND resource_id < $7::uuid))"#,
+                        "granted_at DESC, resource_id DESC",
+                    )
+                };
+                format!(
+                    r#"WITH {AGG}
+                    SELECT resource_type, resource_id, permissions, granted_at, granted_by,
+                           NULL::text   AS sort_str,
+                           NULL::bigint AS sort_int
+                    FROM agg
+                    WHERE {where_clause}
+                    ORDER BY {order_clause}
+                    LIMIT $8"#
+                )
+            }
         };
 
         // ── Execute — uniform 8 binds for every sort mode ─────────────────────
@@ -493,6 +562,7 @@ impl AuthorizationEngine for PgAclEngine {
                         resource_id: r.1,
                         resource_name: sort_str_lc,
                         sort_int: None,
+                        reverse,
                     },
                     "type" => GrantCursor {
                         sort_by: "type".to_owned(),
@@ -500,6 +570,7 @@ impl AuthorizationEngine for PgAclEngine {
                         resource_id: r.1,
                         resource_name: sort_str_lc,
                         sort_int: r.6,
+                        reverse,
                     },
                     "granted_by" => GrantCursor {
                         sort_by: "granted_by".to_owned(),
@@ -507,6 +578,7 @@ impl AuthorizationEngine for PgAclEngine {
                         resource_id: r.1,
                         resource_name: r.5.clone(), // already lowercased by SQL
                         sort_int: None,
+                        reverse,
                     },
                     "size" => GrantCursor {
                         sort_by: "size".to_owned(),
@@ -514,6 +586,7 @@ impl AuthorizationEngine for PgAclEngine {
                         resource_id: r.1,
                         resource_name: None,
                         sort_int: r.6,
+                        reverse,
                     },
                     _ => GrantCursor {
                         sort_by: "granted_at".to_owned(),
@@ -521,6 +594,7 @@ impl AuthorizationEngine for PgAclEngine {
                         resource_id: r.1,
                         resource_name: None,
                         sort_int: None,
+                        reverse,
                     },
                 }
             })

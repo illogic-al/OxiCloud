@@ -430,7 +430,8 @@
         "clear": "최근 항목 지우기",
         "accessed": "접근일",
         "empty_state": "최근 파일이 없습니다",
-        "empty_hint": "열어본 파일이 여기에 표시됩니다"
+        "empty_hint": "열어본 파일이 여기에 표시됩니다",
+        "loadMore": "더 불러오기"
     },
     "notifications": {
         "file_renamed": "파일 이름이 변경되었습니다",
@@ -715,7 +716,14 @@
         "none": "없음",
         "title": "그룹화 기준",
         "owner": "소유자",
-        "shareDate": "공유 날짜"
+        "shareDate": "공유 날짜",
+        "type": "유형",
+        "type.folders": "폴더",
+        "accessedAt": "접근 날짜",
+        "modifiedAt": "수정 날짜",
+        "createdAt": "생성 날짜",
+        "size": "크기",
+        "favoriteDate": "즐겨찾기 날짜"
     },
     "dateBucket": {
         "today": "오늘",

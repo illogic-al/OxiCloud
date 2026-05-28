@@ -1,0 +1,115 @@
+/* ── Item tooltip — "technical sheet" ─────────────────────────────────────── */
+/*                                                                             */
+/* Overlays the search bar area in the top-bar while hovering a file item.    */
+/* Spans from the sidebar right-edge to just before .user-controls.           */
+/*                                                                             */
+/* 3-column CSS grid:  [icon]  [label]  [value]                               */
+/* All values start at the same x position regardless of label width.         */
+
+.path-tooltip {
+    position: fixed;
+
+    /* Fill most of the top-bar (topbar height 70px, 8px margin top/bottom) */
+    top: 8px;
+
+    /* Desktop: starts at sidebar right edge + top-bar padding */
+    left: calc(var(--sidebar-width) + 30px);
+
+    /*
+     * Right edge stops just before .user-controls:
+     *   30px (top-bar right padding) + ~90px (notif bell + gap + avatar btn) + 4px gap
+     * Using left + right instead of width so the browser computes it dynamically.
+     */
+    right: 124px;
+
+    /* High enough to sit above the top-bar content */
+    z-index: 200;
+
+    display: grid;
+    grid-template-columns: 1em max-content 1fr;
+    column-gap: 0.6em;
+    row-gap: 6px;
+    align-items: center;
+
+    /* Fill the top-bar height minus an 8px margin on each side */
+    height: 54px;
+    padding: 0 16px;
+    border-radius: 10px;
+    border: 2px solid var(--color-border-medium);
+
+    background-color: var(--color-bg-input);
+    color: var(--color-text-muted);
+    font-size: 0.75rem;
+
+    pointer-events: none;
+
+    /* avoid blinking when pointer moves between items */
+    transition: display 0.2s allow-discrete;
+}
+
+/* Icon column */
+.path-tooltip__icon {
+    color: var(--color-text-faint);
+    font-size: 0.7rem;
+    text-align: center;
+    justify-self: center;
+}
+
+/* Label column */
+.path-tooltip__label {
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+}
+
+.path-tooltip__label::after {
+    content: ":";
+}
+
+/* Value column */
+.path-tooltip__value {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+/* Path value uses monospace to read folder separators clearly */
+.path-tooltip__value--path {
+    font-family: monospace;
+}
+
+/* "?" placeholder when data is absent */
+.path-tooltip__value--unknown {
+    color: var(--color-text-faint);
+    font-style: italic;
+}
+
+/* ── Narrow screens (sidebar hidden) ────────────────────────────────────── */
+/* On mobile the sidebar slides off-screen; align after the #sidebar-toggle  */
+/* button (≈44px) that takes its place in the top-bar.                       */
+
+@media (max-width: 768px) {
+    .path-tooltip {
+        /* 16px topbar padding + ~44px sidebar-toggle + 8px gap */
+        left: 68px;
+
+        /*
+         * Right edge stops before search-toggle-btn + user-controls:
+         *   ~40px (search-toggle) + 12px (gap) + ~90px (user-controls) + 16px (padding)
+         */
+        right: 158px;
+    }
+}
+
+/* ── Vignette inside tooltip ─────────────────────────────────────────────── */
+/* The vignette name hard-codes 14px; scale it down to match the tooltip.    */
+
+.path-tooltip .user-vignette {
+    overflow: hidden;
+    min-width: 0;
+}
+
+.path-tooltip .user-vignette__name {
+    font-size: 0.75rem;
+}

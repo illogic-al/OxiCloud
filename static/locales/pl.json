@@ -430,7 +430,8 @@
         "clear": "Wyczyść ostatnie",
         "accessed": "Otwarte",
         "empty_state": "Brak ostatnich plików",
-        "empty_hint": "Otwarte pliki pojawią się tutaj"
+        "empty_hint": "Otwarte pliki pojawią się tutaj",
+        "loadMore": "Załaduj więcej"
     },
     "notifications": {
         "file_renamed": "Zmieniono nazwę pliku",
@@ -715,7 +716,14 @@
         "none": "Brak",
         "title": "Grupuj według",
         "owner": "Właściciel",
-        "shareDate": "Data udostępnienia"
+        "shareDate": "Data udostępnienia",
+        "type": "Typ",
+        "type.folders": "Foldery",
+        "accessedAt": "Data dostępu",
+        "modifiedAt": "Data modyfikacji",
+        "createdAt": "Data utworzenia",
+        "size": "Rozmiar",
+        "favoriteDate": "Data dodania do ulubionych"
     },
     "dateBucket": {
         "today": "Dzisiaj",

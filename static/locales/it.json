@@ -430,7 +430,8 @@
         "clear": "Cancella recenti",
         "accessed": "Accesso",
         "empty_state": "Nessun file recente",
-        "empty_hint": "I file che apri appariranno qui"
+        "empty_hint": "I file che apri appariranno qui",
+        "loadMore": "Carica altri"
     },
     "notifications": {
         "file_renamed": "File rinominato",
@@ -715,7 +716,14 @@
         "none": "Nessuno",
         "title": "Raggruppa per",
         "owner": "Proprietario",
-        "shareDate": "Data condivisione"
+        "shareDate": "Data condivisione",
+        "type": "Tipo",
+        "type.folders": "Cartelle",
+        "accessedAt": "Data di accesso",
+        "modifiedAt": "Data di modifica",
+        "createdAt": "Data di creazione",
+        "size": "Dimensione",
+        "favoriteDate": "Data preferito"
     },
     "dateBucket": {
         "today": "Oggi",

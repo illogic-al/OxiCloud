@@ -6,7 +6,7 @@ import { escapeHtml, formatDateTime } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
 import { batchToolbar } from '../features/files/batchToolbar.js';
 import { fileOps } from '../features/files/fileOperations.js';
-import * as pathTooltip from '../features/pathTooltip.js';
+import * as itemTooltip from '../features/itemTooltip.js';
 import { appElements } from './state.js';
 import { ui } from './ui.js';
 
@@ -23,7 +23,7 @@ async function loadTrashItems() {
 
     try {
         if (batchToolbar) batchToolbar.clear();
-        pathTooltip.destroy(elements.filesList);
+        itemTooltip.destroy(elements.filesList);
         ui.resetFilesList(); // ensure also list visible & error hidden
         elements.filesList.innerHTML = `
             <div class="list-header trash-header">
@@ -50,7 +50,7 @@ async function loadTrashItems() {
         trashItems.forEach((item) => {
             addTrashItemToView(item);
         });
-        pathTooltip.init(elements.filesList);
+        itemTooltip.init(elements.filesList);
     } catch (error) {
         console.error('Error loading trash items:', error);
         ui.showNotification('Error', 'Error loading trash items');

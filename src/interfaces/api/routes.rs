@@ -58,9 +58,10 @@ use crate::interfaces::api::handlers::file_handler::{
     delete_file, download_file, get_file_metadata, get_thumbnail, list_files_query,
     move_file_simple, rename_file, upload_file_with_thumbnails, upload_thumbnail,
 };
+#[allow(deprecated)]
 use crate::interfaces::api::handlers::folder_handler::{
     create_folder, delete_folder_with_trash, download_folder_zip, get_folder, list_folder_contents,
-    list_folder_contents_paginated, list_folder_listing, list_root_folders,
+    list_folder_contents_paginated, list_folder_listing, list_folder_resources, list_root_folders,
     list_root_folders_paginated, move_folder, rename_folder,
 };
 use crate::interfaces::api::handlers::i18n_handler::{
@@ -155,6 +156,9 @@ pub fn create_public_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppStat
 /// These routes require authentication when auth is enabled.
 /// Receives the fully-assembled `AppState` and extracts all needed services
 /// from it, avoiding a long parameter list.
+// Legacy folder endpoints (contents, listing) are kept for backward-compat;
+// they are marked #[deprecated] so the OpenAPI spec shows them as deprecated.
+#[allow(deprecated)]
 pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     // Extract services from the pre-built AppState
     let folder_service = app_state.applications.folder_service_concrete.clone();
@@ -195,6 +199,7 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
             "/{id}/contents/paginated",
             get(list_folder_contents_paginated),
         )
+        .route("/{id}/resources", get(list_folder_resources))
         .route("/{id}/rename", put(rename_folder))
         .route("/{id}/move", put(move_folder))
         .with_state(folder_service.clone());
@@ -326,10 +331,14 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     // Create a router without the i18n routes
     // Create routes for favorites if the service is available
     let favorites_router = if let Some(favorites_service) = favorites_service.clone() {
-        use crate::interfaces::api::handlers::favorites_handler;
+        #[allow(deprecated)]
+        use crate::interfaces::api::handlers::favorites_handler::{
+            self, get_favorites, list_favorites_resources,
+        };
 
         Router::new()
-            .route("/", get(favorites_handler::get_favorites))
+            .route("/", get(get_favorites)) // deprecated, kept for compat
+            .route("/resources", get(list_favorites_resources)) // new cursor-paginated endpoint
             .route("/batch", post(favorites_handler::batch_add_favorites))
             .route(
                 "/{item_type}/{item_id}",
@@ -346,10 +355,12 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
 
     // Create routes for recent items if the service is available
     let recent_router = if let Some(recent_service) = recent_service.clone() {
+        #[allow(deprecated)]
         use crate::interfaces::api::handlers::recent_handler;
 
         Router::new()
             .route("/", get(recent_handler::get_recent_items))
+            .route("/resources", get(recent_handler::list_recent_resources))
             .route(
                 "/{item_type}/{item_id}",
                 post(recent_handler::record_item_access),

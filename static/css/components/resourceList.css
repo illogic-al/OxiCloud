@@ -574,6 +574,20 @@
     margin-top: 0;
 }
 
+/* When the header contains a rich DOM node (e.g. a user vignette for the
+   "owner" group-by), reset the typographic overrides that only make sense
+   for plain-text labels, and lay the node out inline. */
+.resource-list__swimlane-header--node {
+    display: flex;
+    align-items: center;
+    padding: 4px 12px;
+    text-transform: none;
+    letter-spacing: normal;
+    font-size: inherit;
+    font-weight: normal;
+    color: inherit;
+}
+
 /* ── Swimlane group card (list view only) ────────────────── */
 
 /* When swimlane groups are present, dissolve the outer container into the

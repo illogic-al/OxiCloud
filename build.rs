@@ -119,6 +119,9 @@ fn process_release(manifest_dir: &Path, static_dir: &Path, out_dir: &Path) {
     let index_html = fs::read_to_string(static_dir.join("index.html")).expect("read index.html");
     let module_scripts = extract_module_scripts(&index_html);
     let js_raw = build_js_module_bundle(&module_scripts, static_dir);
+    // Validate the raw bundle with OXC before minifying — catches re-declaration
+    // collisions and other syntax errors that would silently survive minification.
+    js_bundle_validate(&js_raw);
     let js_bundle = js_minify_script_safe(&js_raw);
     let js_hash = fnv_hash(js_bundle.as_bytes());
     let js_name = format!("app.{js_hash}.js");
@@ -273,8 +276,12 @@ fn extract_module_scripts(html: &str) -> Vec<String> {
 ///   1. DFS from each entry point, following `import … from '…'` edges.
 ///   2. Post-order traversal ensures every dependency is emitted before its importer.
 ///   3. Cycles are broken by marking files as visited before recursing.
-///   4. Each file has its import/export syntax stripped before being appended.
-///   5. The result is wrapped in `(function(){"use strict"; …})();`.
+///   4. **Deconflict pass**: any top-level binding that is private (not exported)
+///      and shared across two or more modules is renamed `NAME_<idx>` in every
+///      module that declares it.  This prevents `SyntaxError: already declared`
+///      when all modules land in the same IIFE scope.
+///   5. Each file has its import/export syntax stripped before being appended.
+///   6. The result is wrapped in `(function(){"use strict"; …})();`.
 fn build_js_module_bundle(entry_scripts: &[String], static_dir: &Path) -> String {
     use std::collections::HashSet;
 
@@ -290,26 +297,204 @@ fn build_js_module_bundle(entry_scripts: &[String], static_dir: &Path) -> String
         "cargo:warning=bundle: {} files in dependency order:",
         order.len()
     );
+
+    // Read all sources upfront — the deconflict pass needs the full set.
+    let mut sources: Vec<String> = order
+        .iter()
+        .map(|f| match fs::read_to_string(f) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("cargo:warning=bundle: cannot read {}: {e}", f.display());
+                String::new()
+            }
+        })
+        .collect();
+
+    // Deconflict: rename private top-level bindings that collide across modules.
+    deconflict_module_sources(&order, &mut sources);
+
+    // Concatenate into a single IIFE.
     let mut bundle = String::with_capacity(2 * 1024 * 1024);
     bundle.push_str("(function(){\n\"use strict\";\n");
-    let mut declared_namespaces = std::collections::HashSet::new();
-    for (i, file) in order.iter().enumerate() {
+    let mut declared_namespaces = HashSet::new();
+    for (i, (file, src)) in order.iter().zip(sources.iter()).enumerate() {
         println!(
             "cargo:warning=bundle [{:>3}/{}] {}",
             i + 1,
             order.len(),
             file.display()
         );
-        match fs::read_to_string(file) {
-            Ok(src) => {
-                bundle.push_str(&strip_esm_syntax(&src, file, &mut declared_namespaces));
-                bundle.push('\n');
-            }
-            Err(e) => eprintln!("cargo:warning=bundle: cannot read {}: {e}", file.display()),
-        }
+        bundle.push_str(&strip_esm_syntax(src, file, &mut declared_namespaces));
+        bundle.push('\n');
     }
     bundle.push_str("})();\n");
     bundle
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deconflict pass
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Rename private top-level bindings that appear in more than one module so
+/// they don't collide when all modules are concatenated into one IIFE scope.
+///
+/// Only **private** (non-exported) names are renamed.  Exported names are the
+/// public API — other modules reference them directly by name after
+/// import-stripping and must not be touched.
+///
+/// The renamed form is `NAME_<module_index>` where the index is the position
+/// of the module in the bundle order — guaranteed unique within the bundle.
+fn deconflict_module_sources(order: &[PathBuf], sources: &mut [String]) {
+    use std::collections::{HashMap, HashSet};
+
+    // Per-module: private (non-exported) top-level binding names.
+    let private_bindings: Vec<Vec<String>> = sources
+        .iter()
+        .map(|src| {
+            let all = top_level_bindings(src);
+            let exported: HashSet<String> = extract_exported_names(src).into_iter().collect();
+            all.into_iter().filter(|n| !exported.contains(n)).collect()
+        })
+        .collect();
+
+    // Count how many modules declare each private name.
+    let mut name_count: HashMap<String, usize> = HashMap::new();
+    for bindings in &private_bindings {
+        for name in bindings {
+            *name_count.entry(name.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // Collision set: names declared privately in more than one module.
+    let collisions: HashSet<String> = name_count
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(name, _)| name)
+        .collect();
+
+    if collisions.is_empty() {
+        return;
+    }
+
+    let mut sorted: Vec<&str> = collisions.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    println!(
+        "cargo:warning=bundle: deconflicting {} name(s): {}",
+        sorted.len(),
+        sorted.join(", ")
+    );
+
+    // Rename each colliding binding within every module that declares it.
+    for (idx, src) in sources.iter_mut().enumerate() {
+        for name in &private_bindings[idx] {
+            if collisions.contains(name) {
+                let new_name = format!("{name}_{idx}");
+                *src = rename_binding(src, name, &new_name);
+                println!(
+                    "cargo:warning=bundle:   [{idx}] {name} -> {new_name}  ({})",
+                    order[idx].file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
+        }
+    }
+}
+
+/// Return the names of all top-level bindings in an ES-module source file that
+/// are **locally declared AND not exported**, using OXC for accurate analysis.
+///
+/// Two categories are excluded so the deconflict pass never touches them:
+///
+/// 1. **Import bindings** (`import { ui } from '…'`): after import-stripping,
+///    these names resolve directly to the exporting module's declaration already
+///    present in the IIFE scope — renaming them would break those references.
+///
+/// 2. **Exported bindings**: other modules import these by name after stripping,
+///    so they must keep their original names.  `ParseReturn::module_record` is
+///    used instead of the text-based `extract_exported_names` helper because
+///    multi-line `export { … }` blocks would otherwise be missed.
+fn top_level_bindings(source: &str) -> Vec<String> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_semantic::SemanticBuilder;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, source, SourceType::mjs()).parse();
+    if !ret.errors.is_empty() {
+        return Vec::new(); // parse failed — skip deconflict for this file
+    }
+
+    // Collect exported local names from the module record (handles single-line
+    // and multi-line export blocks, re-exports, export-declarations, etc.).
+    let exported: std::collections::HashSet<&str> = ret
+        .module_record
+        .local_export_entries
+        .iter()
+        .filter_map(|e| e.local_name.name())
+        .map(|s| s.as_str())
+        .collect();
+
+    let semantic = SemanticBuilder::new().build(&ret.program).semantic;
+    let scoping = semantic.scoping();
+    let root = scoping.root_scope_id();
+    scoping
+        .get_bindings(root)
+        .iter()
+        .filter_map(|(ident, &symbol_id)| {
+            let name = ident.as_str();
+            // Skip import bindings and exported bindings.
+            let flags = scoping.symbol_flags(symbol_id);
+            if flags.is_import() || exported.contains(name) {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        })
+        .collect()
+}
+
+/// Replace every whole-word occurrence of `old` with `new` in `source`.
+///
+/// "Whole word" means the characters immediately before and after the match
+/// are not JavaScript identifier characters (`[a-zA-Z0-9_$]`).  This prevents
+/// `LOAD_MORE_ID` from being accidentally renamed when the source contains
+/// `LOAD_MORE_ID_EXTRA`.
+fn rename_binding(source: &str, old: &str, new: &str) -> String {
+    let old_len = old.len();
+    let mut out = String::with_capacity(source.len());
+    let mut start = 0;
+
+    while let Some(rel) = source[start..].find(old) {
+        let pos = start + rel;
+        let after = pos + old_len;
+
+        let boundary_before = pos == 0
+            || source[..pos]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !is_js_ident_char(c));
+
+        let boundary_after = after >= source.len()
+            || source[after..]
+                .chars()
+                .next()
+                .is_none_or(|c| !is_js_ident_char(c));
+
+        out.push_str(&source[start..pos]);
+        if boundary_before && boundary_after {
+            out.push_str(new);
+        } else {
+            out.push_str(old);
+        }
+        start = after;
+    }
+    out.push_str(&source[start..]);
+    out
+}
+
+#[inline]
+fn is_js_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
 }
 
 /// DFS post-order: push `file` to `order` after all its imports.
@@ -665,6 +850,27 @@ fn collect_import_aliases(stmt: &str, declared: &mut std::collections::HashSet<S
 // ═══════════════════════════════════════════════════════════════════════════════
 // JS minification
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/// Parse the JS bundle with OXC and hard-fail the build on any error.
+///
+/// Called on the **raw** (pre-minification) bundle so error messages still
+/// reference readable source.  Uses `cargo:error=` so Cargo surfaces the
+/// problem immediately and stops the build — no silent fallback.
+fn js_bundle_validate(source: &str) {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    // The bundle is a classic IIFE script, not an ES module.
+    let ret = Parser::new(&allocator, source, SourceType::cjs()).parse();
+    if !ret.errors.is_empty() {
+        for e in &ret.errors {
+            println!("cargo:error=JS bundle parse error: {e}");
+        }
+        std::process::exit(1);
+    }
+}
 
 /// Minify an ES-module file (contains import/export) — returns original on failure.
 fn js_minify_safe(source: &str) -> String {

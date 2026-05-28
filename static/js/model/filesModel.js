@@ -107,4 +107,72 @@ async function fetchListing(folderId, options = {}) {
     };
 }
 
-export { fetchListing, getFolder, rebuildBreadCrumb };
+/**
+ * Map one tagged resource item from `/api/folders/{id}/resources` into the
+ * canonical `FileItem` / `FolderItem` shape used by `ResourceListComponent`.
+ *
+ * @param {{ resource_type: string, resource: Record<string, unknown> }} tagged
+ * @returns {FileItem|FolderItem}
+ */
+function _mapResourceItem(tagged) {
+    const r = tagged.resource;
+    if (tagged.resource_type === 'folder') {
+        return /** @type {FolderItem} */ ({
+            id: String(r.id ?? ''),
+            name: String(r.name ?? ''),
+            path: String(r.path ?? ''),
+            parent_id: r.parent_id != null ? String(r.parent_id) : '',
+            owner_id: r.owner_id != null ? String(r.owner_id) : '',
+            created_at: /** @type {number} */ (r.created_at),
+            modified_at: /** @type {number} */ (r.modified_at),
+            is_root: Boolean(r.is_root),
+            icon_class: String(r.icon_class ?? 'fas fa-folder'),
+            icon_special_class: String(r.icon_special_class ?? 'folder-icon'),
+            category: String(r.category ?? 'Folder')
+        });
+    }
+    return /** @type {FileItem} */ ({
+        id: String(r.id ?? ''),
+        name: String(r.name ?? ''),
+        path: String(r.path ?? ''),
+        folder_id: r.folder_id != null ? String(r.folder_id) : '',
+        owner_id: r.owner_id != null ? String(r.owner_id) : '',
+        mime_type: String(r.mime_type ?? ''),
+        size: /** @type {number} */ (r.size),
+        size_formatted: String(r.size_formatted ?? ''),
+        created_at: /** @type {number} */ (r.created_at),
+        modified_at: /** @type {number} */ (r.modified_at),
+        icon_class: String(r.icon_class ?? ''),
+        icon_special_class: String(r.icon_special_class ?? ''),
+        category: String(r.category ?? '')
+    });
+}
+
+/**
+ * Fetch one cursor page from `GET /api/folders/{id}/resources`.
+ *
+ * @param {string} folderId
+ * @param {{ cursor?: string|null, orderBy?: string, limit?: number, reverse?: boolean }} [opts]
+ * @returns {Promise<{ items: Array<FileItem|FolderItem>, nextCursor: string|null }>}
+ */
+async function fetchResourcesPage(folderId, { cursor = null, orderBy = 'name', limit = 50, reverse = false } = {}) {
+    const params = new URLSearchParams({ order_by: orderBy, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    if (reverse) params.set('reverse', 'true');
+
+    const res = await fetch(`/api/folders/${folderId}/resources?${params}`, NO_CACHE);
+    if (!res.ok) {
+        const err = /** @type {any} */ (new Error(`fetchResourcesPage: ${res.status}`));
+        err.status = res.status;
+        throw err;
+    }
+
+    const data = await res.json();
+    const items = /** @type {Array<{ resource_type: string, resource: Record<string, unknown> }>} */ (Array.isArray(data.items) ? data.items : []).map(
+        _mapResourceItem
+    );
+
+    return { items, nextCursor: data.next_cursor ?? null };
+}
+
+export { fetchListing, fetchResourcesPage, getFolder, rebuildBreadCrumb };

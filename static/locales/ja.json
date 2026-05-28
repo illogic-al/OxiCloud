@@ -430,7 +430,8 @@
         "clear": "最近をクリア",
         "accessed": "アクセス日",
         "empty_state": "最近のファイルはありません",
-        "empty_hint": "開いたファイルがここに表示されます"
+        "empty_hint": "開いたファイルがここに表示されます",
+        "loadMore": "さらに読み込む"
     },
     "notifications": {
         "file_renamed": "ファイル名を変更しました",
@@ -715,7 +716,14 @@
         "none": "なし",
         "title": "グループ化",
         "owner": "オーナー",
-        "shareDate": "共有日"
+        "shareDate": "共有日",
+        "type": "種類",
+        "type.folders": "フォルダー",
+        "accessedAt": "アクセス日",
+        "modifiedAt": "更新日",
+        "createdAt": "作成日",
+        "size": "サイズ",
+        "favoriteDate": "お気に入り登録日"
     },
     "dateBucket": {
         "today": "今日",

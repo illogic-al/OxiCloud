@@ -84,6 +84,7 @@ path = "src/bin/generate-openapi.rs"
 [build-dependencies]
 oxc_allocator = "0.125.0"
 oxc_parser = "0.125.0"
+oxc_semantic = "0.125.0"
 oxc_span = "0.125.0"
 oxc_codegen = "0.125.0"
 oxc_minifier = "0.125.0"

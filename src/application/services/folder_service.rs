@@ -1,5 +1,7 @@
+use crate::application::dtos::cursor::PageCursor;
 use crate::application::dtos::folder_dto::{
-    CreateFolderDto, FolderDto, MoveFolderDto, RenameFolderDto,
+    CreateFolderDto, FolderDto, FolderResourceCursor, FolderResourceRow, ListResourcesOptions,
+    MoveFolderDto, RenameFolderDto,
 };
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::folder_ports::FolderUseCase;
@@ -580,5 +582,111 @@ impl FolderUseCase for FolderService {
                 format!("Failed to delete folder with ID: {}: {}", id, e),
             )
         })
+    }
+}
+
+// ── FolderService — cursor-paginated resource listing ────────────────────────
+
+impl FolderService {
+    /// Cursor-paginated listing of sub-folders **and** files inside `parent_id`.
+    ///
+    /// Enforces `Permission::Read` on the parent folder before querying.
+    /// `order_by` controls both the SQL `ORDER BY` and the cursor encoding.
+    /// `kinds` filters the result to only the specified resource types.
+    pub async fn list_resources_paged_with_perms(
+        &self,
+        parent_id: &str,
+        caller_id: Uuid,
+        opts: ListResourcesOptions<'_>,
+    ) -> Result<(Vec<FolderResourceRow>, Option<String>), DomainError> {
+        // 1. AuthZ — same check as list_folders_with_perms
+        self.authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Read,
+                Self::folder_resource(parent_id)?,
+            )
+            .await?;
+
+        let pid =
+            Uuid::parse_str(parent_id).map_err(|_| DomainError::not_found("Folder", parent_id))?;
+
+        let ListResourcesOptions {
+            limit,
+            cursor,
+            order_by,
+            kinds,
+            reverse,
+        } = opts;
+
+        // 2. Fetch limit+1 rows so we can detect has_next
+        let mut rows = self
+            .folder_storage
+            .list_resources_paged(pid, limit + 1, cursor.as_ref(), order_by, kinds, reverse)
+            .await?;
+
+        // 3. Detect has_next, build encoded next cursor
+        let next_cursor = if rows.len() > limit {
+            let last = &rows[limit - 1];
+            let c = build_folder_resource_cursor(last, order_by, reverse);
+            rows.truncate(limit);
+            Some(c.encode())
+        } else {
+            None
+        };
+
+        Ok((rows, next_cursor))
+    }
+}
+
+/// Build the next-page cursor from the last row of the current page.
+/// `reverse` is stored in the cursor so subsequent pages use the same order.
+fn build_folder_resource_cursor(
+    row: &FolderResourceRow,
+    order_by: &str,
+    reverse: bool,
+) -> FolderResourceCursor {
+    match order_by {
+        "type" => FolderResourceCursor {
+            order_by: "type".to_owned(),
+            resource_id: row.id,
+            sort_str: Some(row.sort_str.clone()),
+            sort_int: Some(row.type_order),
+            sort_ts: None,
+            reverse,
+        },
+        "modified_at" => FolderResourceCursor {
+            order_by: "modified_at".to_owned(),
+            resource_id: row.id,
+            sort_str: None,
+            sort_int: None,
+            sort_ts: Some(row.modified_at),
+            reverse,
+        },
+        "created_at" => FolderResourceCursor {
+            order_by: "created_at".to_owned(),
+            resource_id: row.id,
+            sort_str: None,
+            sort_int: None,
+            sort_ts: Some(row.created_at),
+            reverse,
+        },
+        "size" => FolderResourceCursor {
+            order_by: "size".to_owned(),
+            resource_id: row.id,
+            sort_str: None,
+            sort_int: Some(row.size),
+            sort_ts: None,
+            reverse,
+        },
+        _ => FolderResourceCursor {
+            // "name" (default): sort_int = folder_first (0 or 1)
+            order_by: "name".to_owned(),
+            resource_id: row.id,
+            sort_str: Some(row.sort_str.clone()),
+            sort_int: Some(i64::from(row.folder_first)),
+            sort_ts: None,
+            reverse,
+        },
     }
 }

@@ -121,6 +121,8 @@
 }
 
 .group-by-selector {
+    display: flex;
+    align-items: center;
     position: relative;
 }
 
@@ -130,6 +132,15 @@
 
 .group-by-btn.active {
     color: var(--color-accent);
+}
+
+/* Sort direction button — rotate the SVG icon when order is reversed */
+.sort-dir-btn .oxi-icon {
+    transition: transform 0.2s ease;
+}
+
+.sort-dir-btn.active .oxi-icon {
+    transform: rotate(180deg);
 }
 
 /* Active label shown inline next to the icon */

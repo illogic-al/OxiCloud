@@ -341,16 +341,18 @@ pub async fn list_shared_with_me(
             .into_response();
     }
 
-    // Decode cursor — discard it when the sort dimension changed to avoid
-    // keyset confusion across sort modes.
+    let reverse = q.reverse;
+
+    // Decode cursor — discard it when the sort dimension or direction changed
+    // to avoid keyset confusion across sort modes.
     let cursor = q
         .decode_cursor::<GrantCursor>()
-        .filter(|c| c.sort_by == sort_by);
+        .filter(|c| c.sort_by == sort_by && c.reverse == reverse);
 
     // Fetch paged summaries from the ACL engine.
     let (summaries, next_cursor) = match state
         .authorization
-        .list_incoming_resources_paged(subject, &kinds, limit, cursor, sort_by)
+        .list_incoming_resources_paged(subject, &kinds, limit, cursor, sort_by, reverse)
         .await
     {
         Ok(r) => r,

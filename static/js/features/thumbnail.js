@@ -17,8 +17,11 @@ let _pdfjsLib = null;
  */
 async function getPdfjsLib() {
     if (_pdfjsLib) return _pdfjsLib;
-    // IMPORTANT: this hack (const lib=...) so tsc will not load vendors library
-    const lib = '../vendors/pdf.min.mjs';
+    // IMPORTANT: use an absolute path so the import resolves correctly both in
+    // dev mode (native ESM, module at /js/features/thumbnail.js) and in release
+    // mode (IIFE bundle at /js/app.{hash}.js — relative '../vendors/…' would
+    // incorrectly resolve to /vendors/… instead of /js/vendors/…).
+    const lib = '/js/vendors/pdf.min.mjs';
     _pdfjsLib = /** @type {any} */ (await import(lib));
     _pdfjsLib.GlobalWorkerOptions.workerSrc = '/js/vendors/pdf.worker.min.mjs';
     return _pdfjsLib;

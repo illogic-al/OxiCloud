@@ -430,7 +430,8 @@
         "clear": "Limpar recentes",
         "accessed": "Acessado",
         "empty_state": "Nenhum arquivo recente",
-        "empty_hint": "Os arquivos que você abrir aparecerão aqui"
+        "empty_hint": "Os arquivos que você abrir aparecerão aqui",
+        "loadMore": "Carregar mais"
     },
     "notifications": {
         "file_renamed": "Arquivo renomeado",
@@ -715,7 +716,14 @@
         "none": "Nenhum",
         "title": "Agrupar por",
         "owner": "Proprietário",
-        "shareDate": "Data de partilha"
+        "shareDate": "Data de partilha",
+        "type": "Tipo",
+        "type.folders": "Pastas",
+        "accessedAt": "Data de acesso",
+        "modifiedAt": "Data de modificação",
+        "createdAt": "Data de criação",
+        "size": "Tamanho",
+        "favoriteDate": "Data de favorito"
     },
     "dateBucket": {
         "today": "Hoje",
