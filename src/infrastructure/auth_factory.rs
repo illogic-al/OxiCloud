@@ -5,6 +5,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 
 use crate::application::services::auth_application_service::AuthApplicationService;
 use crate::application::services::folder_service::FolderService;
+use crate::application::services::user_lifecycle_service::UserLifecycleService;
 use crate::common::config::AppConfig;
 use crate::common::di::AuthServices;
 use crate::infrastructure::repositories::{SessionPgRepository, UserPgRepository};
@@ -16,6 +17,7 @@ pub async fn create_auth_services(
     config: &AppConfig,
     pool: Arc<PgPool>,
     folder_service: Option<Arc<FolderService>>,
+    user_lifecycle: Arc<UserLifecycleService>,
 ) -> Result<AuthServices> {
     // Create JWT token service (TokenServicePort implementation)
     let token_service: Arc<JwtTokenService> = Arc::new(JwtTokenService::new(
@@ -48,6 +50,10 @@ pub async fn create_auth_services(
     if let Some(folder_svc) = folder_service {
         auth_app_service = auth_app_service.with_folder_service(folder_svc);
     }
+
+    // Wire the user-lifecycle dispatcher (carries AuditLifecycleHook today;
+    // PR 3+ register HomeFolderLifecycleHook, AuthzCacheLifecycleHook, …).
+    auth_app_service = auth_app_service.with_user_lifecycle(user_lifecycle);
 
     // Configure OIDC service if enabled
     if config.oidc.enabled {

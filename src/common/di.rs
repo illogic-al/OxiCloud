@@ -691,12 +691,26 @@ impl AppServiceFactory {
             storage_usage_service =
                 Some(self.create_storage_usage_service(&repos, &pool, &maintenance_pool));
 
+            // User-lifecycle dispatcher. Audit hook is the only one
+            // registered in PR 1; subsequent PRs register
+            // HomeFolderLifecycleHook (PR 3), AuthzCacheLifecycleHook
+            // (PR 4), etc., each living next to the service that owns
+            // its work. Hook order is registration order — document
+            // dependencies inline if/when any arise.
+            let user_lifecycle = Arc::new(
+                crate::application::services::user_lifecycle_service::UserLifecycleService::new()
+                    .with_hook(Arc::new(
+                        crate::application::services::user_lifecycle_service::AuditLifecycleHook,
+                    )),
+            );
+
             // Auth services
             if self.config.features.enable_auth {
                 let services = crate::infrastructure::auth_factory::create_auth_services(
                     &self.config,
                     pool.clone(),
                     Some(apps.folder_service_concrete.clone()),
+                    user_lifecycle.clone(),
                 )
                 .await
                 .map_err(|e| {

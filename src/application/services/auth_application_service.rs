@@ -6,7 +6,9 @@ use crate::application::ports::auth_ports::{
     UserStoragePort,
 };
 use crate::application::ports::folder_ports::FolderUseCase;
+use crate::application::ports::user_lifecycle::{DeletionMode, LogoutReason};
 use crate::application::services::folder_service::FolderService;
+use crate::application::services::user_lifecycle_service::UserLifecycleService;
 use crate::common::config::OidcConfig;
 use crate::common::errors::{DomainError, ErrorKind};
 use crate::domain::entities::session::Session;
@@ -72,6 +74,9 @@ pub struct AuthApplicationService {
     password_hasher: Arc<Argon2PasswordHasher>,
     token_service: Arc<JwtTokenService>,
     folder_service: Option<Arc<FolderService>>,
+    /// Dispatcher for user-lifecycle events. `None` only in tests that don't
+    /// exercise the lifecycle path; production DI always wires this.
+    user_lifecycle: Option<Arc<UserLifecycleService>>,
     /// Path to the storage directory, used for disk-space–aware quota calculation
     storage_path: PathBuf,
     oidc: RwLock<OidcState>,
@@ -97,6 +102,7 @@ impl AuthApplicationService {
             password_hasher,
             token_service,
             folder_service: None,
+            user_lifecycle: None,
             storage_path,
             oidc: RwLock::new(OidcState {
                 service: None,
@@ -162,6 +168,14 @@ impl AuthApplicationService {
     /// Configures the folder service, needed to create personal folders
     pub fn with_folder_service(mut self, folder_service: Arc<FolderService>) -> Self {
         self.folder_service = Some(folder_service);
+        self
+    }
+
+    /// Configures the user-lifecycle dispatcher. Wired by the DI factory
+    /// after core services are up. PR 1: only AuditLifecycleHook is
+    /// registered, so calls without this configured silently no-op.
+    pub fn with_user_lifecycle(mut self, lifecycle: Arc<UserLifecycleService>) -> Self {
+        self.user_lifecycle = Some(lifecycle);
         self
     }
 
@@ -279,6 +293,13 @@ impl AuthApplicationService {
         // Save user
         let created_user = self.user_storage.create_user(user).await?;
 
+        // Lifecycle: notify hooks (audit, future provisioning, etc.).
+        // PR 3 will move the personal-folder creation below into a
+        // HomeFolderLifecycleHook fired here; for now both run.
+        if let Some(lc) = &self.user_lifecycle {
+            lc.dispatch_created(&created_user).await;
+        }
+
         // Create personal folder for the user
         self.create_personal_folder(&dto.username, created_user.id())
             .await;
@@ -356,6 +377,12 @@ impl AuthApplicationService {
 
         let created_user = self.user_storage.create_user(user).await?;
 
+        // Lifecycle: notify hooks. PR 3 moves home-folder creation into
+        // HomeFolderLifecycleHook fired here.
+        if let Some(lc) = &self.user_lifecycle {
+            lc.dispatch_created(&created_user).await;
+        }
+
         // Create personal folder for the admin
         self.create_personal_folder(&username, created_user.id())
             .await;
@@ -399,6 +426,13 @@ impl AuthApplicationService {
                 "Auth",
                 "Invalid credentials",
             ));
+        }
+
+        // Lifecycle: dispatch login BEFORE register_login() so hooks
+        // observing `last_login_at().is_none()` see "first ever login"
+        // correctly. See tip #1 in user_lifecycle.rs.
+        if let Some(lc) = &self.user_lifecycle {
+            lc.dispatch_login(&user).await;
         }
 
         // Update last login
@@ -496,6 +530,13 @@ impl AuthApplicationService {
             self.session_storage
                 .revoke_session_family(session.family_id())
                 .await?;
+            // Lifecycle: TokenReused logout — fired once per logical
+            // revoke-family call. PR 4 may refine to per-session firing.
+            if let Some(lc) = &self.user_lifecycle
+                && let Ok(user) = self.user_storage.get_user_by_id(session.user_id()).await
+            {
+                lc.dispatch_logout(user, LogoutReason::TokenReused);
+            }
             return Err(DomainError::new(
                 ErrorKind::AccessDenied,
                 "Auth",
@@ -576,6 +617,15 @@ impl AuthApplicationService {
         // Revoke session
         self.session_storage.revoke_session(session.id()).await?;
 
+        // Lifecycle: notify hooks. One extra DB roundtrip per logout
+        // (user load) is acceptable — logout is rare. Failure to load
+        // the user is non-fatal: we already revoked the session.
+        if let Some(lc) = &self.user_lifecycle
+            && let Ok(user) = self.user_storage.get_user_by_id(user_id).await
+        {
+            lc.dispatch_logout(user, LogoutReason::UserInitiated);
+        }
+
         Ok(())
     }
 
@@ -637,12 +687,18 @@ impl AuthApplicationService {
         user.update_password_hash(new_hash);
 
         // Save updated user
-        self.user_storage.update_user(user).await?;
+        self.user_storage.update_user(user.clone()).await?;
 
         // Optional: revoke all sessions to force re-login with new password
         self.session_storage
             .revoke_all_user_sessions(user_id)
             .await?;
+
+        // Lifecycle: PasswordChanged logout — fired once per logical
+        // revoke-all call. PR 4 may refine to per-session firing.
+        if let Some(lc) = &self.user_lifecycle {
+            lc.dispatch_logout(user, LogoutReason::PasswordChanged);
+        }
 
         Ok(())
     }
@@ -828,6 +884,12 @@ impl AuthApplicationService {
                 .await?;
         }
 
+        // Lifecycle: notify hooks. PR 3 moves home-folder creation into
+        // HomeFolderLifecycleHook fired here.
+        if let Some(lc) = &self.user_lifecycle {
+            lc.dispatch_created(&created).await;
+        }
+
         // Create personal folder
         self.create_personal_folder(&dto.username, created.id())
             .await;
@@ -883,7 +945,16 @@ impl AuthApplicationService {
         // Prevent deleting yourself
         let user = self.user_storage.get_user_by_id(user_id).await?;
         tracing::info!("Admin deleting user: {} ({})", user.username(), user_id);
-        self.user_storage.delete_user(user_id).await
+        self.user_storage.delete_user(user_id).await?;
+
+        // Lifecycle: notify hooks (post-commit today; PR 4 will move
+        // this inside a transaction so hook failures can abort the
+        // delete — see tip #7 in user_lifecycle.rs).
+        if let Some(lc) = &self.user_lifecycle {
+            lc.dispatch_deleted(&user, DeletionMode::AdminDelete).await;
+        }
+
+        Ok(())
     }
 
     /// Activate or deactivate a user (admin only)
@@ -1175,7 +1246,12 @@ impl AuthApplicationService {
             .await
         {
             Ok(mut existing_user) => {
-                // User exists — update last login and sync avatar from IdP
+                // User exists — dispatch login BEFORE register_login() so
+                // hooks observe `last_login_at = None` on the very first
+                // login (see tip #1 in the trait docstring).
+                if let Some(lc) = &self.user_lifecycle {
+                    lc.dispatch_login(&existing_user).await;
+                }
                 existing_user.register_login();
                 existing_user.set_image(claims.picture.clone());
                 self.user_storage.update_user(existing_user.clone()).await?;
@@ -1272,6 +1348,14 @@ impl AuthApplicationService {
                 new_user.set_image(claims.picture.clone());
 
                 let created_user = self.user_storage.create_user(new_user).await?;
+
+                // Lifecycle: created (audit) + login (no register_login()
+                // for a fresh OIDC user means `last_login_at` is naturally
+                // None → first-login detection works).
+                if let Some(lc) = &self.user_lifecycle {
+                    lc.dispatch_created(&created_user).await;
+                    lc.dispatch_login(&created_user).await;
+                }
 
                 // Create personal folder
                 self.create_personal_folder(&username, created_user.id())
