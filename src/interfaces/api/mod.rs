@@ -14,22 +14,23 @@ use crate::application::dtos::contact_dto::{
     AddressDto, ContactDto, ContactGroupDto, EmailDto, PhoneDto,
 };
 use crate::application::dtos::favorites_dto::{
-    BatchFavoritesResult, BatchFavoritesStats, FavoriteItemDto,
+    BatchFavoritesResult, BatchFavoritesStats, FavoriteItemDto, FavoritesResourceItemDto,
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::{
-    CreateFolderDto, FolderDto, MoveFolderDto, RenameFolderDto,
+    CreateFolderDto, FolderDto, FolderResourceItemDto, MoveFolderDto, RenameFolderDto,
 };
 use crate::application::dtos::folder_listing_dto::FolderListingDto;
 use crate::application::dtos::grant_dto::{
-    CreateGrantDto, GrantDto, PermissionDto, ResourceDto, ResourceTypeDto, Role, SharedWithMeDto,
-    SharedWithMeItemDto, SubjectDto, SubjectTypeDto, UpdateRoleDto,
+    CreateGrantDto, GrantDto, OutgoingResourceItemDto, PermissionDto, ResourceContentDto,
+    ResourceDto, ResourceTypeDto, Role, SharedWithMeDto, SharedWithMeItemDto, SubjectDto,
+    SubjectTypeDto, UpdateRoleDto,
 };
 use crate::application::dtos::i18n_dto::{
     LocaleDto, TranslationErrorDto, TranslationRequestDto, TranslationResponseDto,
 };
 use crate::application::dtos::pagination::{PaginationDto, PaginationRequestDto};
-use crate::application::dtos::recent_dto::RecentItemDto;
+use crate::application::dtos::recent_dto::{RecentItemDto, RecentResourceItemDto};
 use crate::application::dtos::search_dto::{
     SearchCriteriaDto, SearchFileResultDto, SearchFolderResultDto, SearchResultsDto,
     SearchSuggestionItem, SearchSuggestionsDto,
@@ -93,6 +94,7 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::folder_handler::list_folder_contents,
         handlers::folder_handler::list_root_folders_paginated,
         handlers::folder_handler::list_folder_contents_paginated,
+        handlers::folder_handler::list_folder_resources,
         handlers::folder_handler::list_folder_listing,
         handlers::folder_handler::rename_folder,
         handlers::folder_handler::move_folder,
@@ -144,11 +146,13 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::share_handler::download_share_zip_subfolder,
         // Favorites handlers (free functions)
         handlers::favorites_handler::get_favorites,
+        handlers::favorites_handler::list_favorites_resources,
         handlers::favorites_handler::add_favorite,
         handlers::favorites_handler::remove_favorite,
         handlers::favorites_handler::batch_add_favorites,
         // Recent handlers (free functions)
         handlers::recent_handler::get_recent_items,
+        handlers::recent_handler::list_recent_resources,
         handlers::recent_handler::record_item_access,
         handlers::recent_handler::remove_from_recent,
         handlers::recent_handler::clear_recent_items,
@@ -157,6 +161,7 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         // Batch handlers (free functions)
         handlers::batch_handler::move_files_batch,
         handlers::batch_handler::copy_files_batch,
+        handlers::batch_handler::copy_folders_batch,
         handlers::batch_handler::delete_files_batch,
         handlers::batch_handler::get_files_batch,
         handlers::batch_handler::delete_folders_batch,
@@ -229,7 +234,20 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::grant_handler::list_incoming,
         handlers::grant_handler::list_shared_with_me,
         handlers::grant_handler::list_outgoing,
+        handlers::grant_handler::list_my_shares,
         handlers::grant_handler::list_on_resource,
+        // Subject-group handlers (ReBAC named groups) — free functions
+        handlers::subject_group_handler::create_group,
+        handlers::subject_group_handler::list_groups,
+        handlers::subject_group_handler::search_groups,
+        handlers::subject_group_handler::get_group,
+        handlers::subject_group_handler::update_group,
+        handlers::subject_group_handler::delete_group,
+        handlers::subject_group_handler::list_members,
+        handlers::subject_group_handler::add_member,
+        handlers::subject_group_handler::remove_user_member,
+        handlers::subject_group_handler::remove_group_member,
+        handlers::subject_group_handler::list_effective_members,
     ),
     components(
         schemas(
@@ -239,6 +257,8 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
             RenameFolderDto,
             MoveFolderDto,
             FolderListingDto,
+            FolderResourceItemDto,
+            ResourceContentDto,
             // File schemas
             FileDto,
             MoveFilePayload,
@@ -275,10 +295,12 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
             SearchSuggestionItem,
             // Favorites schemas
             FavoriteItemDto,
+            FavoritesResourceItemDto,
             BatchFavoritesResult,
             BatchFavoritesStats,
             // Recent schemas
             RecentItemDto,
+            RecentResourceItemDto,
             // i18n schemas
             LocaleDto,
             TranslationRequestDto,
@@ -319,6 +341,14 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
             GrantDto,
             SharedWithMeDto,
             SharedWithMeItemDto,
+            OutgoingResourceItemDto,
+            // Subject-group (ReBAC named groups) schemas
+            handlers::subject_group_handler::CreateGroupRequest,
+            handlers::subject_group_handler::UpdateGroupRequest,
+            handlers::subject_group_handler::AddSubjectGroupMemberRequest,
+            handlers::subject_group_handler::GroupDto,
+            handlers::subject_group_handler::GroupListDto,
+            handlers::subject_group_handler::GroupMemberDto,
         )
     ),
     tags(
@@ -339,6 +369,7 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         (name = "contacts", description = "Address books, contacts, and groups endpoints"),
         (name = "admin", description = "Admin management endpoints"),
         (name = "grants", description = "ReBAC grant management endpoints"),
+        (name = "groups", description = "ReBAC subject-group management endpoints (named, nestable, root-owned)"),
     ),
     info(
         title = "OxiCloud API",

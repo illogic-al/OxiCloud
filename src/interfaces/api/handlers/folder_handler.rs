@@ -664,6 +664,7 @@ pub async fn download_folder_zip(
          body = FolderResourcesDto),
         (status = 404, description = "Folder not found or access denied"),
     ),
+    security(("bearerAuth" = [])),
     tag = "folders"
 )]
 pub async fn list_folder_resources(

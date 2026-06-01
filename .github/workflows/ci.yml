@@ -125,14 +125,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Initialize test database
-        run: psql -h localhost -U postgres -d oxicloud_test -f migrations/20260307000000_initial_schema.sql
+        # Applies every migration + seeds the integration-test admin row.
+        # Same script used by `just test-integration` locally.
+        run: bash tests/common/init-test-schema.sh
         env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: postgres
           PGPASSWORD: postgres
+          PGDATABASE: oxicloud_test
 
       - name: Run tests
         run: cargo test --all-features --workspace
         env:
           DATABASE_URL: "postgres://postgres:postgres@localhost/oxicloud_test"
+
+      - name: Run integration tests
+        run: cargo test --all-features --workspace --tests
+        env:
+          DATABASE_URL: "postgres://postgres:postgres@localhost/oxicloud_test"
+          RUSTFLAGS: "-Dwarnings --cfg integration_tests"
 
   rust-audit:
     name: Security Audit
