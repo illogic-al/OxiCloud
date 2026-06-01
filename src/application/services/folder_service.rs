@@ -778,12 +778,31 @@ impl UserLifecycleHook for HomeFolderLifecycleHook {
         Ok(())
     }
 
-    async fn on_user_deleted(&self, _user: &User, _mode: DeletionMode) -> Result<(), DomainError> {
-        // PR 4 will fill this in with the trash-vs-hard-delete policy
-        // (AdminDelete → trash with retention, GdprPurge → hard delete).
-        // For PR 3 the eager `DELETE FROM auth.users` cascades via the
-        // existing FK on storage.folders to remove the home folder, so a
-        // no-op here matches behaviour parity.
+    async fn on_user_deleted(
+        &self,
+        user: &User,
+        mode: DeletionMode,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), DomainError> {
+        // For both DeletionMode variants today the FK CASCADE on
+        // `storage.folders.user_id` (and downstream files/blobs)
+        // removes the home folder + contents when the user row goes.
+        // The hook emits a per-mode tracing event so audit can tell
+        // AdminDelete (currently recoverable only via DB-level rollback
+        // before commit) from GdprPurge (no sweeper exists yet — the
+        // variant is reserved for a future PR that adds retention).
+        //
+        // The `tx` is provided per the trait contract but unused here:
+        // emitting a tracing event doesn't require DB access. Future
+        // policy (trash with retention) would write to `storage.trash`
+        // inside this same tx.
+        tracing::info!(
+            target: "user_lifecycle",
+            hook = "home_folder",
+            user_id = %user.id(),
+            mode = ?mode,
+            "Home folder will be removed via FK CASCADE on user delete"
+        );
         Ok(())
     }
 }

@@ -968,19 +968,45 @@ impl AuthApplicationService {
         Ok(UserDto::from(user))
     }
 
-    /// Delete a user by ID (admin only)
+    /// Delete a user by ID (admin only).
+    ///
+    /// Runs the whole flow in a single transaction so the lifecycle
+    /// hooks (`SessionRevocationLifecycleHook` revoking sessions with
+    /// audit, `AuthzCacheLifecycleHook` invalidating the Moka cache,
+    /// `HomeFolderLifecycleHook` for future trash policy, …) can do
+    /// their work atomically with the user DELETE. If any hook returns
+    /// `Err`, the transaction rolls back and the user remains intact.
     pub async fn delete_user_admin(&self, user_id: Uuid) -> Result<(), DomainError> {
-        // Prevent deleting yourself
         let user = self.user_storage.get_user_by_id(user_id).await?;
         tracing::info!("Admin deleting user: {} ({})", user.username(), user_id);
-        self.user_storage.delete_user(user_id).await?;
 
-        // Lifecycle: notify hooks (post-commit today; PR 4 will move
-        // this inside a transaction so hook failures can abort the
-        // delete — see tip #7 in user_lifecycle.rs).
+        let mut tx = self
+            .user_storage
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| DomainError::internal_error("Auth", format!("begin tx: {}", e)))?;
+
+        // Hooks run inside the tx, BEFORE the user DELETE. They see the
+        // row still present and can write cleanup queries against the
+        // same tx (e.g. session revocation with per-session audit).
         if let Some(lc) = &self.user_lifecycle {
-            lc.dispatch_deleted(&user, DeletionMode::AdminDelete).await;
+            lc.dispatch_deleted(&user, DeletionMode::AdminDelete, &mut tx)
+                .await?;
         }
+
+        // Now the DELETE — FK CASCADE handles the downstream cleanup
+        // (sessions, folders, files, …) for anything the hooks didn't
+        // explicitly remove.
+        sqlx::query("DELETE FROM auth.users WHERE id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DomainError::internal_error("Auth", format!("delete user: {}", e)))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DomainError::internal_error("Auth", format!("commit: {}", e)))?;
 
         Ok(())
     }

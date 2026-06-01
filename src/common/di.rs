@@ -693,13 +693,26 @@ impl AppServiceFactory {
 
             // User-lifecycle dispatcher. Hook order is registration order;
             // document dependencies inline if/when any arise. Today:
-            //   1. AuditLifecycleHook       — fires first so the audit
-            //                                 event is recorded even if a
-            //                                 later hook errors out.
-            //   2. HomeFolderLifecycleHook  — provisions the user's home
-            //                                 folder on created/login (no-op
-            //                                 for external users).
-            // Subsequent PRs register AuthzCacheLifecycleHook (PR 4) etc.
+            //   1. AuditLifecycleHook             — fires first so the
+            //                                       audit event is recorded
+            //                                       even if a later hook
+            //                                       errors out.
+            //   2. HomeFolderLifecycleHook        — provisions the user's
+            //                                       home folder on
+            //                                       created/login (no-op
+            //                                       for external users).
+            //   3. AuthzCacheLifecycleHook        — invalidates the
+            //                                       Moka group-expansion
+            //                                       cache on logout/delete
+            //                                       so a re-login sees fresh
+            //                                       membership immediately.
+            //   4. SessionRevocationLifecycleHook — explicit per-user
+            //                                       session revocation on
+            //                                       delete (with audit) —
+            //                                       replaces the silent FK
+            //                                       CASCADE.
+            // PR 5 will append ExternalIdentityLifecycleHook (stub).
+            let session_repo_for_hook = Arc::new(SessionPgRepository::new(pool.clone()));
             let user_lifecycle = Arc::new(
                 crate::application::services::user_lifecycle_service::UserLifecycleService::new()
                     .with_hook(Arc::new(
@@ -708,6 +721,16 @@ impl AppServiceFactory {
                     .with_hook(Arc::new(
                         crate::application::services::folder_service::HomeFolderLifecycleHook::new(
                             apps.folder_service_concrete.clone(),
+                        ),
+                    ))
+                    .with_hook(Arc::new(
+                        crate::infrastructure::services::pg_acl_engine::AuthzCacheLifecycleHook::new(
+                            authorization.clone(),
+                        ),
+                    ))
+                    .with_hook(Arc::new(
+                        crate::application::services::user_lifecycle_service::SessionRevocationLifecycleHook::new(
+                            session_repo_for_hook,
                         ),
                     )),
             );

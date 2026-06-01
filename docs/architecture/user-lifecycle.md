@@ -54,12 +54,12 @@ pub enum DeletionMode {
 
 `UserLifecycleService` aggregates registered hooks and fans out events with **per-event failure semantics**. The trait itself is uniform; the dispatcher decides whether to await, whether to spawn, and whether `Err` aborts.
 
-| Event              | Awaited?      | On `Err`                                |
-|--------------------|---------------|-----------------------------------------|
-| `on_user_created`  | yes (sync)    | log-and-continue (retry on next login)  |
-| `on_user_login`    | yes (sync)    | log-and-continue (idempotent retry)     |
-| `on_user_logout`   | no (spawned)  | logged, never propagated                |
-| `on_user_deleted`  | yes (sync)    | log-and-continue today; PR 4 makes it abort-the-transaction |
+| Event              | Awaited?         | On `Err`                                |
+|--------------------|------------------|-----------------------------------------|
+| `on_user_created`  | yes (sync)       | log-and-continue (retry on next login)  |
+| `on_user_login`    | yes (sync)       | log-and-continue (idempotent retry)     |
+| `on_user_logout`   | no (spawned)     | logged, never propagated                |
+| `on_user_deleted`  | yes (sync, in tx) | **abort the transaction** — first `Err` rolls back the user DELETE and propagates to the admin endpoint as a 500 |
 
 The asymmetry is deliberate. `on_user_created` and `on_user_login` must complete before the session token is returned, so callers see consistent state. `on_user_logout` is bookkeeping; the HTTP response shouldn't wait for cache flushes — the dispatcher spawns. `on_user_deleted` will become atomic-with-the-DELETE in PR 4 when a transaction handle joins the trait signature.
 
@@ -111,7 +111,7 @@ These are codified in the module-level docstring of `application/ports/user_life
 
 4. **Per-session logout firing.** When a flow revokes multiple sessions in one call (e.g. `revoke_all_user_sessions` on password change), today the dispatcher fires `on_user_logout` ONCE per logical revoke-call. PR 4's `SessionRevocationLifecycleHook` will refine to once-per-session for proper audit granularity. Hooks must accept N redundant calls with the same reason — keep them idempotent.
 
-5. **`on_user_deleted` is post-commit today.** The user row is already gone when the hook fires. Returning `Err` cannot roll back. PR 4 refactors `delete_user_admin` to expose a transaction handle, at which point the trait gains `tx: &mut Transaction` and `Err` will abort the delete.
+5. **`on_user_deleted` runs inside the delete transaction.** The user row still exists when the hook fires; the dispatcher commits only after every hook returns `Ok(())`. Returning `Err` aborts the whole transaction — including the user DELETE itself. Implementors get `tx: &mut sqlx::Transaction<'_, Postgres>` so cleanup queries land in the same tx (e.g. session revocation with audit trail before FK CASCADE wipes the rows). Be conservative about returning `Err`: an abort means the admin's delete operation fails, leaving the user intact.
 
 6. **Hook order is registration order.** The DI factory determines firing sequence. If two hooks have an ordering dependency (e.g. home-folder must exist before default-calendar can be seeded inside it), the dependent hook registers AFTER the producer. Document the convention inline in the DI block.
 
@@ -120,13 +120,46 @@ These are codified in the module-level docstring of `application/ports/user_life
 | Hook | Lives in | Responsibility |
 |---|---|---|
 | `AuditLifecycleHook` | `src/application/services/user_lifecycle_service.rs` (co-located with dispatcher) | All four events: emits one `tracing::info!(target: "audit", event = "user.*", ...)` per call, with `is_external` as a field. Co-located because audit is cross-cutting with no domain owner. |
-| `HomeFolderLifecycleHook` | `src/application/services/folder_service.rs` (same module as `FolderService`) | `on_user_created` + `on_user_login`: idempotently provision "My Folder - {username}" via `FolderService::ensure_home_folder`. Short-circuits when `user.is_external()`. `on_user_logout`: `Ok(())`. `on_user_deleted`: `Ok(())` for PR 3 — PR 4 adds the trash-vs-hard-delete policy based on `DeletionMode`. Owns the responsibility that pre-PR 3 was scattered across four eager `create_personal_folder` calls in `AuthApplicationService` and one self-heal at the folder-listing path. |
+| `HomeFolderLifecycleHook` | `src/application/services/folder_service.rs` (same module as `FolderService`) | `on_user_created` + `on_user_login`: idempotently provision "My Folder - {username}" via `FolderService::ensure_home_folder`. Short-circuits when `user.is_external()`. `on_user_logout`: `Ok(())`. `on_user_deleted`: per-mode `tracing::info!` event so audit distinguishes AdminDelete from GdprPurge — the FK CASCADE on `storage.folders.user_id` handles the actual row removal. Trash-with-retention is documented as future work. |
+| `AuthzCacheLifecycleHook` | `src/infrastructure/services/pg_acl_engine.rs` (same module as the Moka cache it invalidates) | `on_user_logout` + `on_user_deleted`: `engine.invalidate_user_groups_cache(user.id())` — drops the cached transitive-group expansion immediately so a re-login (or a re-created account with the same id) sees fresh memberships without waiting for the 30 s TTL. `on_user_created` + `on_user_login`: `Ok(())` (no stale entry could exist for these). |
+| `SessionRevocationLifecycleHook` | `src/application/services/user_lifecycle_service.rs` (co-located with dispatcher; no dedicated session service module today) | `on_user_deleted`: explicit `session_storage.revoke_all_user_sessions(user.id())` + aggregate audit event (`event = "user.sessions_revoked_on_delete", count = N`). Replaces the silent FK CASCADE with an observable revocation. All other events: `Ok(())`. |
+| `DeletionMode` | enum on the trait | Distinguishes admin-initiated delete (`AdminDelete` — currently identical to GDPR but reserved for a future trash-with-retention policy) from GDPR right-to-erasure purge (`GdprPurge` — for a future sweeper). PR 4 ships the variants; future PRs may add per-mode behaviour. |
 
 Subsequent PRs add:
 
-- `AuthzCacheLifecycleHook` (PR 4) — invalidates the `user_groups_cache` Moka entry on logout/delete.
-- `SessionRevocationLifecycleHook` (PR 4) — refines per-session logout granularity; explicit session revocation inside the user-delete transaction.
 - `ExternalIdentityLifecycleHook` (PR 5, stub for now) — populated by the upcoming magic-link external-user feature.
+
+### How the delete transaction composes
+
+```text
+AuthApplicationService::delete_user_admin(user_id)
+    │
+    ▼
+BEGIN
+    │
+    ▼
+dispatch_deleted(user, AdminDelete, &mut tx)
+    │
+    ├── AuditLifecycleHook        → tracing::info!(event="user.deleted", mode=...)
+    ├── HomeFolderLifecycleHook   → tracing::info!("home folder will be removed via FK CASCADE")
+    ├── AuthzCacheLifecycleHook   → engine.invalidate_user_groups_cache(user_id)
+    └── SessionRevocationLifecycleHook
+                                  → session_storage.revoke_all_user_sessions(user_id)
+                                  → tracing::info!(event="user.sessions_revoked_on_delete",
+                                                   count=N)
+    │
+    ▼
+DELETE FROM auth.users WHERE id = $1
+    │
+    ▼  (FK CASCADE removes folders, files, app_passwords, device_codes, calendar
+    │   shares, address-book shares, etc.; trg_cleanup_grants_user removes the
+    │   user's grants)
+    │
+    ▼
+COMMIT
+```
+
+If any hook returns `Err`, the dispatcher propagates it; `delete_user_admin` rolls back the transaction and surfaces the error to the admin endpoint as a 500. The user row, all sessions, all folders/files, all grants — everything stays in place. Hook implementors should keep that strong constraint in mind: returning `Err` from `on_user_deleted` is a heavy hammer.
 
 ### Worked example: brand-new user logs in for the first time
 

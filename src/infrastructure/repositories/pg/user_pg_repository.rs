@@ -27,6 +27,14 @@ impl UserPgRepository {
         Self { pool }
     }
 
+    /// Borrowed access to the connection pool. Exposed so callers can
+    /// open transactions that span this repo and other repos / hooks
+    /// (e.g. `AuthApplicationService::delete_user_admin` opening a tx
+    /// that wraps the lifecycle dispatcher + the DELETE).
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     // Helper method to map SQL errors to domain errors
     pub fn map_sqlx_error(err: sqlx::Error) -> UserRepositoryError {
         match err {

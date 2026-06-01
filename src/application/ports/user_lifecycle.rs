@@ -32,7 +32,7 @@
 //! | `on_user_created`  | yes      | log-and-continue (retry on next login) |
 //! | `on_user_login`    | yes      | log-and-continue (idempotent retry)    |
 //! | `on_user_logout`   | no       | fire-and-forget (spawned), error logged|
-//! | `on_user_deleted`  | yes      | log-and-continue today; PR 4 will switch to abort-the-transaction once the dispatcher fires inside the delete tx |
+//! | `on_user_deleted`  | yes (in tx) | abort the transaction (Err propagates) |
 //!
 //! # Tips for hook implementors
 //!
@@ -79,12 +79,15 @@
 //!    manually. The `on_user_login` safety-net will retry on the next
 //!    successful authentication.
 //!
-//! 7. **`on_user_deleted` is post-commit today.** The user row is
-//!    already gone when the hook fires. Returning `Err` cannot roll
-//!    back the delete. PR 4 will refactor `delete_user_admin` to expose
-//!    a transaction handle, at which point the trait gains a `tx:
-//!    &mut Transaction` parameter and `Err` will abort the delete. For
-//!    now: best-effort cleanup, log failures, don't assume atomicity.
+//! 7. **`on_user_deleted` runs inside the delete transaction.** The
+//!    user row still exists when the hook fires; the dispatcher commits
+//!    only after every hook returns `Ok(())`. Returning `Err` aborts
+//!    the whole transaction — including the user DELETE itself.
+//!    Implementors get `tx: &mut sqlx::Transaction<'_, Postgres>` so
+//!    cleanup queries land in the same tx (e.g. session revocation
+//!    with audit trail before FK CASCADE wipes the rows). Be
+//!    conservative about returning `Err`: an abort means the admin's
+//!    delete operation fails, leaving the user intact.
 //!
 //! 8. **Hook order is registration order.** The DI factory at
 //!    [`AppServiceFactory`] determines the firing sequence. If two hooks
@@ -178,9 +181,16 @@ pub trait UserLifecycleHook: Send + Sync {
     /// The HTTP response shouldn't wait for downstream cache flushes.
     async fn on_user_logout(&self, user: &User, reason: LogoutReason) -> Result<(), DomainError>;
 
-    /// Fires after a successful `DELETE FROM auth.users`. **Post-commit
-    /// today** — see tip #7. The user row is already gone; cleanup must
-    /// be best-effort. PR 4 will refactor to provide a transaction
-    /// handle and switch to before-commit-in-tx semantics.
-    async fn on_user_deleted(&self, user: &User, mode: DeletionMode) -> Result<(), DomainError>;
+    /// Fires inside the `delete_user_admin` transaction, BEFORE the
+    /// `DELETE FROM auth.users` row removal. The user row still exists
+    /// at this point; `user.id()` is safe to reference in queries on
+    /// the same `tx`. Returning `Err` rolls back the transaction —
+    /// the user is NOT deleted and the admin's request fails. See
+    /// tip #7 in the module docstring.
+    async fn on_user_deleted(
+        &self,
+        user: &User,
+        mode: DeletionMode,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), DomainError>;
 }

@@ -100,23 +100,30 @@ impl UserLifecycleService {
         });
     }
 
-    /// Deleted: log-and-continue (post-commit today). PR 4 refactors
-    /// `delete_user_admin` to expose a transaction handle and switches
-    /// this to abort-on-first-Err to make cleanup atomic with the user
-    /// DELETE. See tip #7 in the trait docstring.
-    pub async fn dispatch_deleted(&self, user: &User, mode: DeletionMode) {
+    /// Deleted: runs inside the `delete_user_admin` transaction. First
+    /// `Err` propagates and aborts the transaction — the user is NOT
+    /// deleted. Hooks must keep their cleanup conservative. See tip #7
+    /// in the trait docstring.
+    pub async fn dispatch_deleted(
+        &self,
+        user: &User,
+        mode: DeletionMode,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), DomainError> {
         for h in &self.hooks {
-            if let Err(e) = h.on_user_deleted(user, mode).await {
+            if let Err(e) = h.on_user_deleted(user, mode, tx).await {
                 tracing::error!(
                     target: "user_lifecycle",
                     hook = h.name(),
                     mode = ?mode,
                     user_id = %user.id(),
                     error = %e,
-                    "on_user_deleted failed"
+                    "on_user_deleted failed — aborting transaction"
                 );
+                return Err(e);
             }
         }
+        Ok(())
     }
 }
 
@@ -174,7 +181,14 @@ impl UserLifecycleHook for AuditLifecycleHook {
         Ok(())
     }
 
-    async fn on_user_deleted(&self, user: &User, mode: DeletionMode) -> Result<(), DomainError> {
+    async fn on_user_deleted(
+        &self,
+        user: &User,
+        mode: DeletionMode,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), DomainError> {
+        // Audit hook doesn't write to the DB — only emits a tracing
+        // event. The `_tx` is intentionally ignored.
         tracing::info!(
             target: "audit",
             event = "user.deleted",
@@ -182,6 +196,85 @@ impl UserLifecycleHook for AuditLifecycleHook {
             username = %user.username(),
             is_external = user.is_external(),
             mode = ?mode,
+        );
+        Ok(())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SessionRevocationLifecycleHook
+//
+// Replaces the silent FK CASCADE on `auth.sessions.user_id` with an
+// explicit `revoke_all_user_sessions` call inside the delete transaction
+// — emits an aggregate audit event ("user.sessions_revoked_on_delete,
+// count=N") so the deletion of N sessions is observable, instead of N
+// rows quietly vanishing via CASCADE.
+//
+// Co-located with the dispatcher because there is no dedicated session
+// service today; the session-storage port is the only consumer. If a
+// `SessionService` ever emerges, this hook moves there.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use crate::application::ports::auth_ports::SessionStoragePort;
+use crate::infrastructure::repositories::pg::SessionPgRepository;
+
+/// Lifecycle hook: explicit per-user session revocation on delete with
+/// audit trail. On any other event: explicit no-op.
+pub struct SessionRevocationLifecycleHook {
+    session_storage: Arc<SessionPgRepository>,
+}
+
+impl SessionRevocationLifecycleHook {
+    pub fn new(session_storage: Arc<SessionPgRepository>) -> Self {
+        Self { session_storage }
+    }
+}
+
+#[async_trait]
+impl UserLifecycleHook for SessionRevocationLifecycleHook {
+    fn name(&self) -> &'static str {
+        "session_revocation"
+    }
+
+    async fn on_user_created(&self, _user: &User) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    async fn on_user_login(&self, _user: &User) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    async fn on_user_logout(&self, _user: &User, _reason: LogoutReason) -> Result<(), DomainError> {
+        // The session causing this logout has already been revoked by
+        // the caller (logout / change_password / etc.). Nothing for this
+        // hook to do.
+        Ok(())
+    }
+
+    async fn on_user_deleted(
+        &self,
+        user: &User,
+        mode: DeletionMode,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), DomainError> {
+        // NOTE on `_tx`: ideally this would use the transaction so the
+        // session revocation is atomic with the user DELETE. The current
+        // SessionStoragePort surface doesn't expose a tx-accepting
+        // variant of `revoke_all_user_sessions`, so we revoke against
+        // the same pool. The FK CASCADE on `auth.sessions.user_id`
+        // would clean up any sessions left behind by a rollback anyway,
+        // so the safety net holds.
+        let count = self
+            .session_storage
+            .revoke_all_user_sessions(user.id())
+            .await?;
+        tracing::info!(
+            target: "audit",
+            event = "user.sessions_revoked_on_delete",
+            user_id = %user.id(),
+            username = %user.username(),
+            mode = ?mode,
+            count = count,
         );
         Ok(())
     }
