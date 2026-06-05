@@ -196,7 +196,8 @@
         "shareCopied": "Link skopiowany do schowka",
         "shareCreated": "Link udostępniania utworzony pomyślnie",
         "shareUpdated": "Ustawienia udostępniania zaktualizowane pomyślnie",
-        "shareRemoved": "Udostępnienie usunięte pomyślnie"
+        "shareRemoved": "Udostępnienie usunięte pomyślnie",
+        "inviteByEmail": "Zaproś przez e-mail — zaproszenie zostanie wysłane"
     },
     "share_dialogTitle": "Link udostępniania",
     "share_linkLabel": "Link udostępniania:",
@@ -697,7 +698,23 @@
         "migration_verify_passed": "Weryfikacja zaliczona",
         "migration_verify_failed": "Weryfikacja nieudana",
         "migration_failed_blobs": "nieudane bloby",
-        "testing": "Testowanie…"
+        "testing": "Testowanie…",
+        "smtp_disabled": "Wyłączone (host nieustawiony)",
+        "smtp_enabled": "Włączone",
+        "smtp_enabled_label": "Status",
+        "smtp_intro": "SMTP jest konfigurowany wyłącznie przez zmienne środowiskowe (OXICLOUD_SMTP_*). Poniższe wartości są odczytywane z działającego serwera — aby je zmienić, zmodyfikuj środowisko i uruchom ponownie OxiCloud.",
+        "smtp_not_configured": "SMTP nie jest skonfigurowany na tym serwerze.",
+        "smtp_send_failed": "Wysłanie nie powiodło się.",
+        "smtp_send_test": "Wyślij e-mail testowy",
+        "smtp_sending": "Wysyłanie…",
+        "smtp_sent": "E-mail testowy wysłany.",
+        "smtp_server_code": "Odpowiedź serwera",
+        "smtp_test_intro": "Wysyła wstępnie zdefiniowaną wiadomość diagnostyczną do podanego poniżej odbiorcy i raportuje odpowiedź serwera SMTP, abyś mógł skorelować ją z logami swojego przekaźnika.",
+        "smtp_test_missing_to": "Wprowadź adres odbiorcy.",
+        "smtp_test_title": "Wyślij e-mail testowy",
+        "smtp_test_to": "Adres odbiorcy",
+        "smtp_title": "Poczta wychodząca (SMTP)",
+        "tab_smtp": "SMTP"
     },
     "profile": {
         "page_title": "Profil",
@@ -850,5 +867,15 @@
         "delete_confirm_label": "Wpisz nazwę grupy, aby potwierdzić:",
         "delete_confirm_mismatch": "Wpisz nazwę grupy dokładnie, aby potwierdzić.",
         "virtual_internal_name": "Wewnętrzni"
+    },
+    "myshares": {
+        "copyLink": "Skopiuj link",
+        "deleteLink": "Usuń link",
+        "notifyByEmail": "Powiadom e-mailem",
+        "notifyFailed": "Nie udało się wysłać powiadomienia.",
+        "notifyGroupMembers": "Powiadom członków grupy",
+        "notifyRateLimited": "Zbyt wiele powiadomień dla tego odbiorcy — spróbuj ponownie później.",
+        "removeAccess": "Usuń dostęp",
+        "resendInvitation": "Wyślij ponownie e-mail z zaproszeniem"
     }
 }

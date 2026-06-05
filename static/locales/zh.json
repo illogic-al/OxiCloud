@@ -196,7 +196,8 @@
         "shareCopied": "链接已复制到剪贴板",
         "shareCreated": "共享链接创建成功",
         "shareUpdated": "共享设置更新成功",
-        "shareRemoved": "共享已移除"
+        "shareRemoved": "共享已移除",
+        "inviteByEmail": "通过邮件邀请 — 将发送邀请"
     },
     "share_dialogTitle": "共享链接",
     "share_linkLabel": "共享链接：",
@@ -680,7 +681,23 @@
         "migration_verify_passed": "验证通过",
         "migration_verify_failed": "验证失败",
         "migration_failed_blobs": "失败的块",
-        "testing": "正在测试..."
+        "testing": "正在测试...",
+        "smtp_disabled": "已禁用（未设置主机）",
+        "smtp_enabled": "已启用",
+        "smtp_enabled_label": "状态",
+        "smtp_intro": "SMTP 仅通过环境变量（OXICLOUD_SMTP_*）配置。以下值是从运行中的服务器读取的 — 如需修改，请编辑环境变量并重启 OxiCloud。",
+        "smtp_not_configured": "此服务器未配置 SMTP。",
+        "smtp_send_failed": "发送失败。",
+        "smtp_send_test": "发送测试邮件",
+        "smtp_sending": "发送中…",
+        "smtp_sent": "测试邮件已发送。",
+        "smtp_server_code": "服务器回复",
+        "smtp_test_intro": "向下方收件人发送预设的诊断消息，并报告 SMTP 服务器的响应,以便您与中继日志进行核对。",
+        "smtp_test_missing_to": "请输入收件人地址。",
+        "smtp_test_title": "发送测试邮件",
+        "smtp_test_to": "收件人地址",
+        "smtp_title": "出站邮件 (SMTP)",
+        "tab_smtp": "SMTP"
     },
     "profile": {
         "page_title": "个人资料",
@@ -850,5 +867,15 @@
         "delete_confirm_label": "请输入群组名称以确认：",
         "delete_confirm_mismatch": "请准确输入群组名称以确认。",
         "virtual_internal_name": "内部"
+    },
+    "myshares": {
+        "copyLink": "复制链接",
+        "deleteLink": "删除链接",
+        "notifyByEmail": "通过邮件通知",
+        "notifyFailed": "无法发送通知。",
+        "notifyGroupMembers": "通知群组成员",
+        "notifyRateLimited": "对此收件人的通知过多 — 请稍后重试。",
+        "removeAccess": "移除访问权限",
+        "resendInvitation": "重新发送邀请邮件"
     }
 }

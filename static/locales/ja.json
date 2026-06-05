@@ -196,7 +196,8 @@
         "shareCopied": "リンクがクリップボードにコピーされました",
         "shareCreated": "共有リンクが正常に作成されました",
         "shareUpdated": "共有設定が正常に更新されました",
-        "shareRemoved": "共有が正常に削除されました"
+        "shareRemoved": "共有が正常に削除されました",
+        "inviteByEmail": "メールで招待 — 招待を送信します"
     },
     "share_dialogTitle": "共有リンク",
     "share_linkLabel": "共有リンク:",
@@ -697,7 +698,23 @@
         "migration_verify_passed": "検証に合格",
         "migration_verify_failed": "検証に失敗",
         "migration_failed_blobs": "失敗したブロブ",
-        "testing": "テスト中..."
+        "testing": "テスト中...",
+        "smtp_disabled": "無効 (ホスト未設定)",
+        "smtp_enabled": "有効",
+        "smtp_enabled_label": "ステータス",
+        "smtp_intro": "SMTP は環境変数 (OXICLOUD_SMTP_*) でのみ設定します。以下の値は稼働中のサーバーから読み取られます — 変更するには環境を編集して OxiCloud を再起動してください。",
+        "smtp_not_configured": "このサーバーでは SMTP が設定されていません。",
+        "smtp_send_failed": "送信に失敗しました。",
+        "smtp_send_test": "テストメールを送信",
+        "smtp_sending": "送信中…",
+        "smtp_sent": "テストメールを送信しました。",
+        "smtp_server_code": "サーバーの応答",
+        "smtp_test_intro": "あらかじめ定義された診断メッセージを下記の宛先に送信し、SMTP サーバーの応答を表示します。これを使ってリレーのログと突き合わせて確認できます。",
+        "smtp_test_missing_to": "宛先アドレスを入力してください。",
+        "smtp_test_title": "テストメールを送信",
+        "smtp_test_to": "宛先アドレス",
+        "smtp_title": "送信メール (SMTP)",
+        "tab_smtp": "SMTP"
     },
     "profile": {
         "page_title": "プロフィール",
@@ -850,5 +867,15 @@
         "delete_confirm_label": "確認のためにグループ名を入力してください:",
         "delete_confirm_mismatch": "確認のためにグループ名を正確に入力してください。",
         "virtual_internal_name": "内部"
+    },
+    "myshares": {
+        "copyLink": "リンクをコピー",
+        "deleteLink": "リンクを削除",
+        "notifyByEmail": "メールで通知",
+        "notifyFailed": "通知を送信できませんでした。",
+        "notifyGroupMembers": "グループメンバーに通知",
+        "notifyRateLimited": "この受信者への通知が多すぎます — しばらくしてから再試行してください。",
+        "removeAccess": "アクセスを削除",
+        "resendInvitation": "招待メールを再送信"
     }
 }

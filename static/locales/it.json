@@ -196,7 +196,8 @@
         "shareCopied": "Link copiato negli appunti",
         "shareCreated": "Link di condivisione creato con successo",
         "shareUpdated": "Impostazioni di condivisione aggiornate con successo",
-        "shareRemoved": "Condivisione rimossa con successo"
+        "shareRemoved": "Condivisione rimossa con successo",
+        "inviteByEmail": "Invita via email — verrà inviato un invito"
     },
     "share_dialogTitle": "Link di condivisione",
     "share_linkLabel": "Link di condivisione:",
@@ -697,7 +698,23 @@
         "migration_verify_passed": "Verifica superata",
         "migration_verify_failed": "Verifica fallita",
         "migration_failed_blobs": "Blob falliti",
-        "testing": "Test in corso..."
+        "testing": "Test in corso...",
+        "smtp_disabled": "Disabilitato (host non impostato)",
+        "smtp_enabled": "Abilitato",
+        "smtp_enabled_label": "Stato",
+        "smtp_intro": "SMTP è configurato esclusivamente tramite variabili d'ambiente (OXICLOUD_SMTP_*). I valori sottostanti sono letti dal server in esecuzione — per modificarli, modifica l'ambiente e riavvia OxiCloud.",
+        "smtp_not_configured": "SMTP non è configurato su questo server.",
+        "smtp_send_failed": "Invio non riuscito.",
+        "smtp_send_test": "Invia email di prova",
+        "smtp_sending": "Invio in corso…",
+        "smtp_sent": "Email di prova inviata.",
+        "smtp_server_code": "Risposta del server",
+        "smtp_test_intro": "Invia un messaggio diagnostico predefinito al destinatario indicato sotto e riporta la risposta del server SMTP, così puoi correlarla con i log del tuo relay.",
+        "smtp_test_missing_to": "Inserisci un indirizzo destinatario.",
+        "smtp_test_title": "Invia un'email di prova",
+        "smtp_test_to": "Indirizzo destinatario",
+        "smtp_title": "Email in uscita (SMTP)",
+        "tab_smtp": "SMTP"
     },
     "profile": {
         "page_title": "Profilo",
@@ -850,5 +867,15 @@
         "delete_confirm_label": "Digita il nome del gruppo per confermare:",
         "delete_confirm_mismatch": "Digita esattamente il nome del gruppo per confermare.",
         "virtual_internal_name": "Interno"
+    },
+    "myshares": {
+        "copyLink": "Copia link",
+        "deleteLink": "Elimina link",
+        "notifyByEmail": "Notifica via email",
+        "notifyFailed": "Impossibile inviare la notifica.",
+        "notifyGroupMembers": "Notifica i membri del gruppo",
+        "notifyRateLimited": "Troppe notifiche per questo destinatario — riprova più tardi.",
+        "removeAccess": "Rimuovi accesso",
+        "resendInvitation": "Reinvia email di invito"
     }
 }

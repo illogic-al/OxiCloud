@@ -196,7 +196,8 @@
         "shareCopied": "링크가 클립보드에 복사되었습니다",
         "shareCreated": "공유 링크가 성공적으로 생성되었습니다",
         "shareUpdated": "공유 설정이 성공적으로 업데이트되었습니다",
-        "shareRemoved": "공유가 성공적으로 삭제되었습니다"
+        "shareRemoved": "공유가 성공적으로 삭제되었습니다",
+        "inviteByEmail": "이메일로 초대 — 초대장이 전송됩니다"
     },
     "share_dialogTitle": "공유 링크",
     "share_linkLabel": "공유 링크:",
@@ -697,7 +698,23 @@
         "migration_verify_passed": "확인 통과",
         "migration_verify_failed": "확인 실패",
         "migration_failed_blobs": "실패한 블롭",
-        "testing": "테스트 중..."
+        "testing": "테스트 중...",
+        "smtp_disabled": "비활성화됨 (호스트 미설정)",
+        "smtp_enabled": "활성화됨",
+        "smtp_enabled_label": "상태",
+        "smtp_intro": "SMTP는 환경 변수(OXICLOUD_SMTP_*)로만 구성됩니다. 아래 값들은 실행 중인 서버에서 읽어옵니다 — 변경하려면 환경을 수정하고 OxiCloud를 다시 시작하세요.",
+        "smtp_not_configured": "이 서버에는 SMTP가 구성되어 있지 않습니다.",
+        "smtp_send_failed": "전송 실패.",
+        "smtp_send_test": "테스트 이메일 보내기",
+        "smtp_sending": "보내는 중…",
+        "smtp_sent": "테스트 이메일을 보냈습니다.",
+        "smtp_server_code": "서버 응답",
+        "smtp_test_intro": "아래 수신자에게 미리 정의된 진단 메시지를 보내고 SMTP 서버의 응답을 표시합니다. 이를 통해 릴레이 로그와 대조하여 확인할 수 있습니다.",
+        "smtp_test_missing_to": "수신자 주소를 입력하세요.",
+        "smtp_test_title": "테스트 이메일 보내기",
+        "smtp_test_to": "수신자 주소",
+        "smtp_title": "발신 이메일 (SMTP)",
+        "tab_smtp": "SMTP"
     },
     "profile": {
         "page_title": "프로필",
@@ -850,5 +867,15 @@
         "delete_confirm_label": "확인을 위해 그룹 이름을 입력하세요:",
         "delete_confirm_mismatch": "확인을 위해 그룹 이름을 정확히 입력하세요.",
         "virtual_internal_name": "내부"
+    },
+    "myshares": {
+        "copyLink": "링크 복사",
+        "deleteLink": "링크 삭제",
+        "notifyByEmail": "이메일로 알림",
+        "notifyFailed": "알림을 보낼 수 없습니다.",
+        "notifyGroupMembers": "그룹 구성원에게 알림",
+        "notifyRateLimited": "이 수신자에게 알림이 너무 많습니다 — 나중에 다시 시도하세요.",
+        "removeAccess": "액세스 제거",
+        "resendInvitation": "초대 이메일 다시 보내기"
     }
 }

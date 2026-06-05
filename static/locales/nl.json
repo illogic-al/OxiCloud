@@ -196,7 +196,8 @@
         "shareCopied": "Link gekopieerd naar klembord",
         "shareCreated": "Deellink succesvol aangemaakt",
         "shareUpdated": "Deelinstellingen bijgewerkt",
-        "shareRemoved": "Delen verwijderd"
+        "shareRemoved": "Delen verwijderd",
+        "inviteByEmail": "Uitnodigen via e-mail — uitnodiging wordt verzonden"
     },
     "share_dialogTitle": "Deellink",
     "share_linkLabel": "Deellink:",
@@ -697,7 +698,23 @@
         "migration_verify_passed": "Verificatie geslaagd",
         "migration_verify_failed": "Verificatie mislukt",
         "migration_failed_blobs": "Mislukte blobs",
-        "testing": "Bezig met testen..."
+        "testing": "Bezig met testen...",
+        "smtp_disabled": "Uitgeschakeld (host niet ingesteld)",
+        "smtp_enabled": "Ingeschakeld",
+        "smtp_enabled_label": "Status",
+        "smtp_intro": "SMTP wordt uitsluitend geconfigureerd via omgevingsvariabelen (OXICLOUD_SMTP_*). De onderstaande waarden worden gelezen uit de actieve server — om ze te wijzigen, bewerk de omgeving en herstart OxiCloud.",
+        "smtp_not_configured": "SMTP is niet geconfigureerd op deze server.",
+        "smtp_send_failed": "Verzenden mislukt.",
+        "smtp_send_test": "Test-e-mail verzenden",
+        "smtp_sending": "Bezig met verzenden…",
+        "smtp_sent": "Test-e-mail verzonden.",
+        "smtp_server_code": "Serverantwoord",
+        "smtp_test_intro": "Verzendt een vooraf gedefinieerd diagnostisch bericht naar de onderstaande ontvanger en rapporteert het antwoord van de SMTP-server, zodat je het kunt correleren met je relay-logboeken.",
+        "smtp_test_missing_to": "Voer een ontvangeradres in.",
+        "smtp_test_title": "Test-e-mail verzenden",
+        "smtp_test_to": "Ontvangeradres",
+        "smtp_title": "Uitgaande e-mail (SMTP)",
+        "tab_smtp": "SMTP"
     },
     "profile": {
         "page_title": "Profiel",
@@ -850,5 +867,15 @@
         "delete_confirm_label": "Typ de groepsnaam ter bevestiging:",
         "delete_confirm_mismatch": "Typ de groepsnaam exact om te bevestigen.",
         "virtual_internal_name": "Intern"
+    },
+    "myshares": {
+        "copyLink": "Link kopiëren",
+        "deleteLink": "Link verwijderen",
+        "notifyByEmail": "Per e-mail notificeren",
+        "notifyFailed": "Notificatie kon niet worden verzonden.",
+        "notifyGroupMembers": "Groepsleden notificeren",
+        "notifyRateLimited": "Te veel notificaties voor deze ontvanger — probeer het later opnieuw.",
+        "removeAccess": "Toegang verwijderen",
+        "resendInvitation": "Uitnodigingsmail opnieuw verzenden"
     }
 }

@@ -196,7 +196,8 @@
         "shareCopied": "تم نسخ الرابط إلى الحافظة",
         "shareCreated": "تم إنشاء رابط المشاركة بنجاح",
         "shareUpdated": "تم تحديث إعدادات المشاركة بنجاح",
-        "shareRemoved": "تمت إزالة المشاركة بنجاح"
+        "shareRemoved": "تمت إزالة المشاركة بنجاح",
+        "inviteByEmail": "دعوة عبر البريد الإلكتروني — ستُرسل الدعوة"
     },
     "share_dialogTitle": "رابط المشاركة",
     "share_linkLabel": "رابط المشاركة:",
@@ -697,7 +698,23 @@
         "migration_verify_passed": "اجتاز التحقق",
         "migration_verify_failed": "فشل التحقق",
         "migration_failed_blobs": "كتل فاشلة",
-        "testing": "جارٍ الاختبار..."
+        "testing": "جارٍ الاختبار...",
+        "smtp_disabled": "معطّل (المضيف غير مضبوط)",
+        "smtp_enabled": "مفعّل",
+        "smtp_enabled_label": "الحالة",
+        "smtp_intro": "يتم تكوين SMTP حصريًا عبر متغيرات البيئة (OXICLOUD_SMTP_*). تُقرأ القيم أدناه من الخادم قيد التشغيل — لتغييرها، عدّل البيئة وأعد تشغيل OxiCloud.",
+        "smtp_not_configured": "SMTP غير مكوَّن على هذا الخادم.",
+        "smtp_send_failed": "فشل الإرسال.",
+        "smtp_send_test": "إرسال بريد اختباري",
+        "smtp_sending": "جارٍ الإرسال…",
+        "smtp_sent": "تم إرسال البريد الاختباري.",
+        "smtp_server_code": "رد الخادم",
+        "smtp_test_intro": "يرسل رسالة تشخيصية محددة مسبقًا إلى المستلم أدناه ويُبلِّغ عن استجابة خادم SMTP لتتمكن من مطابقتها مع سجلات المرحّل الخاص بك.",
+        "smtp_test_missing_to": "أدخل عنوان المستلم.",
+        "smtp_test_title": "إرسال بريد اختباري",
+        "smtp_test_to": "عنوان المستلم",
+        "smtp_title": "البريد الصادر (SMTP)",
+        "tab_smtp": "SMTP"
     },
     "profile": {
         "page_title": "الملف الشخصي",
@@ -850,5 +867,15 @@
         "delete_confirm_label": "اكتب اسم المجموعة للتأكيد:",
         "delete_confirm_mismatch": "اكتب اسم المجموعة كما هو للتأكيد.",
         "virtual_internal_name": "داخلي"
+    },
+    "myshares": {
+        "copyLink": "نسخ الرابط",
+        "deleteLink": "حذف الرابط",
+        "notifyByEmail": "إشعار عبر البريد الإلكتروني",
+        "notifyFailed": "تعذّر إرسال الإشعار.",
+        "notifyGroupMembers": "إشعار أعضاء المجموعة",
+        "notifyRateLimited": "عدد كبير من الإشعارات لهذا المستلم — حاول لاحقًا.",
+        "removeAccess": "إزالة الوصول",
+        "resendInvitation": "إعادة إرسال بريد الدعوة"
     }
 }

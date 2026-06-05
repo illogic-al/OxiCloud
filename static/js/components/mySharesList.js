@@ -471,7 +471,7 @@ class MySharesList {
             menu.appendChild(this._menuSeparator());
             menu.appendChild(this._menuExpiryRow(grant, item, rowEl, initialExpiry));
             menu.appendChild(this._menuSeparator());
-            const removeIcon = grant.subject_type === 'group' ? 'fas fa-user-group' : 'fas fa-user-times';
+            const removeIcon = grant.subject_type === 'group' ? 'fas fa-user-group' : 'fas fa-user-xmark';
             menu.appendChild(
                 this._menuItem(removeIcon, i18n.t('myshares.removeAccess', 'Remove access'), true, async () => {
                     menu.remove();

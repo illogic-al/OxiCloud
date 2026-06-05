@@ -867,5 +867,15 @@
         "delete_confirm_label": "Tapez le nom du groupe pour confirmer :",
         "delete_confirm_mismatch": "Tapez le nom du groupe exactement pour confirmer.",
         "virtual_internal_name": "Interne"
+    },
+    "myshares": {
+        "copyLink": "Copier le lien",
+        "deleteLink": "Supprimer le lien",
+        "notifyByEmail": "Notifier par e-mail",
+        "notifyFailed": "Impossible d'envoyer la notification.",
+        "notifyGroupMembers": "Notifier les membres du groupe",
+        "notifyRateLimited": "Trop de notifications pour ce destinataire — réessayez plus tard.",
+        "removeAccess": "Retirer l'accès",
+        "resendInvitation": "Renvoyer l'e-mail d'invitation"
     }
 }

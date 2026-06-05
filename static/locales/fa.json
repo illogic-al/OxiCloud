@@ -196,7 +196,8 @@
         "shareCopied": "پیوند به بُریده‌دان رونوشت شد",
         "shareCreated": "پیوند هم‌رسانی با موفقیت ایجاد شد",
         "shareUpdated": "تنظیمات هم‌رسانی با موفقیت به‌روزرسانی شد",
-        "shareRemoved": "هم‌رسانی با موفقیت پاک شد"
+        "shareRemoved": "هم‌رسانی با موفقیت پاک شد",
+        "inviteByEmail": "دعوت از طریق ایمیل — دعوت ارسال خواهد شد"
     },
     "share_dialogTitle": "پیوند هم‌رسانی",
     "share_linkLabel": "پیوند هم‌رسانی:",
@@ -680,7 +681,23 @@
         "migration_verify_passed": "تأیید موفق",
         "migration_verify_failed": "تأیید ناموفق",
         "migration_failed_blobs": "بلوب‌های ناموفق",
-        "testing": "در حال آزمایش..."
+        "testing": "در حال آزمایش...",
+        "smtp_disabled": "غیرفعال (میزبان تنظیم نشده)",
+        "smtp_enabled": "فعال",
+        "smtp_enabled_label": "وضعیت",
+        "smtp_intro": "SMTP فقط از طریق متغیرهای محیطی (OXICLOUD_SMTP_*) پیکربندی می‌شود. مقادیر زیر از سرور در حال اجرا خوانده می‌شوند — برای تغییر آن‌ها، محیط را ویرایش کرده و OxiCloud را راه‌اندازی مجدد کنید.",
+        "smtp_not_configured": "SMTP روی این سرور پیکربندی نشده است.",
+        "smtp_send_failed": "ارسال ناموفق.",
+        "smtp_send_test": "ارسال ایمیل آزمایشی",
+        "smtp_sending": "در حال ارسال…",
+        "smtp_sent": "ایمیل آزمایشی ارسال شد.",
+        "smtp_server_code": "پاسخ سرور",
+        "smtp_test_intro": "یک پیام تشخیصی از پیش تعریف‌شده را به گیرنده زیر ارسال می‌کند و پاسخ سرور SMTP را گزارش می‌دهد تا بتوانید آن را با گزارش‌های ریلی خود مطابقت دهید.",
+        "smtp_test_missing_to": "آدرس گیرنده را وارد کنید.",
+        "smtp_test_title": "ارسال ایمیل آزمایشی",
+        "smtp_test_to": "آدرس گیرنده",
+        "smtp_title": "ایمیل خروجی (SMTP)",
+        "tab_smtp": "SMTP"
     },
     "profile": {
         "page_title": "پروفایل",
@@ -850,5 +867,15 @@
         "delete_confirm_label": "نام گروه را برای تأیید وارد کنید:",
         "delete_confirm_mismatch": "نام گروه را دقیقاً برای تأیید وارد کنید.",
         "virtual_internal_name": "داخلی"
+    },
+    "myshares": {
+        "copyLink": "کپی پیوند",
+        "deleteLink": "حذف پیوند",
+        "notifyByEmail": "اطلاع‌رسانی از طریق ایمیل",
+        "notifyFailed": "ارسال اعلان ممکن نشد.",
+        "notifyGroupMembers": "اطلاع‌رسانی به اعضای گروه",
+        "notifyRateLimited": "اعلان‌های زیادی برای این گیرنده — بعداً دوباره تلاش کنید.",
+        "removeAccess": "حذف دسترسی",
+        "resendInvitation": "ارسال مجدد ایمیل دعوت"
     }
 }
