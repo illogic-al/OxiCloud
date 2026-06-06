@@ -1,6 +1,8 @@
 use uuid::Uuid;
 
-use crate::domain::services::path_service::{StoragePath, validate_storage_name};
+use crate::domain::services::path_service::{
+    StoragePath, normalize_storage_name, validate_storage_name,
+};
 
 // Re-export entity errors from the centralized module
 pub use super::entity_errors::{FileError, FileResult};
@@ -21,7 +23,8 @@ pub struct FileParts {
     pub created_at: u64,
     pub modified_at: u64,
     pub owner_id: Option<Uuid>,
-    pub etag: String,
+    /// BLAKE3 content hash. See [`File::content_hash`] for semantics.
+    pub blob_hash: String,
 }
 
 /**
@@ -66,8 +69,14 @@ pub struct File {
     /// Owner user ID (from storage.files.user_id)
     owner_id: Option<Uuid>,
 
-    /// Content-addressable ETag (= blob_hash). Changes on every content write.
-    etag: String,
+    /// BLAKE3 content hash. Stable across renames/moves, changes only
+    /// when the file's content bytes change. Source of truth for both
+    /// content-addressable storage and the HTTP ETag (via
+    /// [`File::etag`]). Exposed publicly via [`File::content_hash`]
+    /// so the REST API can surface it as a distinct concept from the
+    /// ETag (the ETag formula may grow to include `modified_at` etc.,
+    /// but `content_hash` remains the raw hash).
+    blob_hash: String,
 }
 
 // We no longer need this module, now we use a String directly
@@ -85,7 +94,7 @@ impl Default for File {
             created_at: 0,
             modified_at: 0,
             owner_id: None,
-            etag: String::new(),
+            blob_hash: String::new(),
         }
     }
 }
@@ -100,6 +109,7 @@ impl File {
         mime_type: String,
         folder_id: Option<String>,
     ) -> FileResult<Self> {
+        let name = normalize_storage_name(&name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
@@ -123,7 +133,7 @@ impl File {
             created_at: now,
             modified_at: now,
             owner_id: None,
-            etag: String::new(),
+            blob_hash: String::new(),
         })
     }
 
@@ -136,6 +146,7 @@ impl File {
         created_at: u64,
         modified_at: u64,
     ) -> FileResult<Self> {
+        let name = normalize_storage_name(&name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
@@ -154,7 +165,7 @@ impl File {
             created_at,
             modified_at,
             owner_id: None,
-            etag: String::new(),
+            blob_hash: String::new(),
         })
     }
 
@@ -170,7 +181,7 @@ impl File {
         modified_at: u64,
         owner_id: Option<Uuid>,
     ) -> FileResult<Self> {
-        Self::with_timestamps_and_etag(
+        Self::with_timestamps_and_blob_hash(
             id,
             name,
             storage_path,
@@ -185,7 +196,7 @@ impl File {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn with_timestamps_and_etag(
+    pub fn with_timestamps_and_blob_hash(
         id: String,
         name: String,
         storage_path: StoragePath,
@@ -195,8 +206,9 @@ impl File {
         created_at: u64,
         modified_at: u64,
         owner_id: Option<Uuid>,
-        etag: String,
+        blob_hash: String,
     ) -> FileResult<Self> {
+        let name = normalize_storage_name(&name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
@@ -215,7 +227,7 @@ impl File {
             created_at,
             modified_at,
             owner_id,
-            etag,
+            blob_hash,
         })
     }
 
@@ -235,12 +247,67 @@ impl File {
             created_at: self.created_at,
             modified_at: self.modified_at,
             owner_id: self.owner_id,
-            etag: self.etag,
+            blob_hash: self.blob_hash,
         }
     }
 
-    pub fn etag(&self) -> &str {
-        &self.etag
+    /// Raw BLAKE3 content hash — the cryptographic identity of the
+    /// file's bytes. Stable across renames, moves, and metadata
+    /// updates. Changes only when the underlying content changes.
+    ///
+    /// This is **distinct from [`File::etag`]**: the ETag is an HTTP
+    /// cache token that may incorporate non-content signals (mtime,
+    /// permissions, …) in future revisions; `content_hash` is the
+    /// raw hash, suitable for content-addressable URLs, dedup
+    /// verification, and integrity audits. Keep both accessible —
+    /// the API layer can choose to expose `content_hash` even when
+    /// `etag` grows additional inputs.
+    pub fn content_hash(&self) -> &str {
+        &self.blob_hash
+    }
+
+    /// Opaque HTTP ETag string (raw, NOT HTTP-quoted). Handlers wrap
+    /// in `"…"` themselves at the HTTP boundary.
+    ///
+    /// This is a thin instance-method wrapper around
+    /// [`File::compute_etag`] — see that function for the full
+    /// formula, rationale, and the "single source of truth"
+    /// guarantee that lets raw-row listings (`/api/folders/{id}/resources`,
+    /// favorites, trash, recents, REPORT/SEARCH) compute the same
+    /// value without constructing a full `File` entity.
+    pub fn etag(&self) -> String {
+        Self::compute_etag(&self.blob_hash, self.modified_at)
+    }
+
+    /// Pure formula for the file ETag, exposed as a static method so
+    /// listing handlers that operate on raw SQL rows (rather than
+    /// fully-constructed `File` entities) route through the same
+    /// definition.
+    ///
+    /// **Formula**: `{blob_hash[..16]}-{modified_at}`.
+    ///
+    /// - The 16-char BLAKE3 prefix is the content identity (64 bits
+    ///   ≈ 10⁻⁹ collision probability over 10M files).
+    /// - `modified_at` (Unix seconds) catches the `x-oc-mtime`
+    ///   case: NextCloud preserves the client-side mtime on upload,
+    ///   so a "touch-then-resync" of unchanged content still bumps
+    ///   the mtime — without the suffix the ETag wouldn't change
+    ///   and clients would serve stale metadata.
+    /// - When `blob_hash` is shorter than 16 chars (test fixtures,
+    ///   stub entities) the prefix is just the whole value.
+    /// - Folder ETags follow a separate formula — see
+    ///   [`crate::domain::entities::folder::Folder::compute_etag`].
+    ///
+    /// Every handler that emits a file ETag header MUST go through
+    /// this function (directly or via [`File::etag`] /
+    /// `FileDto::etag`) so `GET`, `HEAD`, `PROPFIND`, `PUT`
+    /// response, `MOVE`, and every JSON listing return
+    /// byte-identical values for the same file. Changing the
+    /// formula here changes it everywhere — that is the property
+    /// we want.
+    pub fn compute_etag(blob_hash: &str, modified_at: u64) -> String {
+        let prefix: String = blob_hash.chars().take(16).collect();
+        format!("{}-{}", prefix, modified_at)
     }
 
     // Getters
@@ -298,7 +365,11 @@ impl File {
         // Create storage_path from string
         let storage_path = StoragePath::from_string(&path);
 
-        // Create directly without validation to avoid errors in DTO conversions
+        // Create directly without validation to avoid errors in DTO
+        // conversions. Still NFC-normalize so even DTO-reconstructed
+        // entities maintain the storage invariant.
+        let name = normalize_storage_name(&name);
+
         Self {
             id,
             name,
@@ -310,7 +381,7 @@ impl File {
             created_at,
             modified_at,
             owner_id: None,
-            etag: String::new(),
+            blob_hash: String::new(),
         }
     }
 
@@ -318,6 +389,7 @@ impl File {
 
     /// Creates a new version of the file with updated name
     pub fn with_name(&self, new_name: String) -> FileResult<Self> {
+        let new_name = normalize_storage_name(&new_name);
         if let Err(reason) = validate_storage_name(&new_name) {
             return Err(FileError::InvalidFileName(format!("{new_name}: {reason}")));
         }
@@ -348,7 +420,7 @@ impl File {
             created_at: self.created_at,
             modified_at: now,
             owner_id: self.owner_id,
-            etag: self.etag.clone(),
+            blob_hash: self.blob_hash.clone(),
         })
     }
 
@@ -383,7 +455,7 @@ impl File {
             created_at: self.created_at,
             modified_at: now,
             owner_id: self.owner_id,
-            etag: self.etag.clone(),
+            blob_hash: self.blob_hash.clone(),
         })
     }
 
@@ -405,7 +477,7 @@ impl File {
             created_at: self.created_at,
             modified_at: now,
             owner_id: self.owner_id,
-            etag: self.etag.clone(),
+            blob_hash: self.blob_hash.clone(),
         }
     }
 }
@@ -466,5 +538,78 @@ mod tests {
         let renamed = renamed.unwrap();
         assert_eq!(renamed.name(), "newname.txt");
         assert_eq!(renamed.id(), "123"); // The ID does not change
+    }
+
+    /// The ETag formula is `{blob_hash[..16]}-{modified_at}`. Two
+    /// fixtures with identical content + mtime must produce
+    /// byte-identical ETags — that's the invariant every handler
+    /// relies on when comparing a cached client ETag against a
+    /// freshly-loaded one.
+    #[test]
+    fn test_etag_combines_blob_hash_prefix_and_mtime() {
+        let file = File::with_timestamps_and_blob_hash(
+            "id-1".to_string(),
+            "file.txt".to_string(),
+            StoragePath::from_string("/file.txt"),
+            42,
+            "text/plain".to_string(),
+            None,
+            1_000,
+            2_000,
+            None,
+            "abcdef0123456789ZZZZZZZZ".to_string(),
+        )
+        .unwrap();
+
+        // content_hash stays raw — full blob hash, no truncation.
+        assert_eq!(file.content_hash(), "abcdef0123456789ZZZZZZZZ");
+        // etag is the 16-char prefix + "-" + mtime.
+        assert_eq!(file.etag(), "abcdef0123456789-2000");
+    }
+
+    /// When the blob hash is shorter than 16 chars (test fixtures,
+    /// stub entities), the prefix degrades to "whatever is there".
+    /// Production blob hashes are always full BLAKE3 hex (64 chars).
+    #[test]
+    fn test_etag_short_blob_hash_uses_full_value() {
+        let file = File::with_timestamps_and_blob_hash(
+            "id-1".to_string(),
+            "file.txt".to_string(),
+            StoragePath::from_string("/file.txt"),
+            42,
+            "text/plain".to_string(),
+            None,
+            1_000,
+            2_000,
+            None,
+            "shorthash".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(file.etag(), "shorthash-2000");
+    }
+
+    /// `content_hash` is the cryptographic identity of the bytes —
+    /// it must NEVER change because of metadata operations like
+    /// rename. The ETag is allowed to change (because `with_name`
+    /// bumps `modified_at`), but the content hash is not.
+    #[test]
+    fn test_content_hash_stable_across_rename() {
+        let file = File::with_timestamps_and_blob_hash(
+            "id-1".to_string(),
+            "file.txt".to_string(),
+            StoragePath::from_string("/file.txt"),
+            42,
+            "text/plain".to_string(),
+            None,
+            1_000,
+            2_000,
+            None,
+            "stable-content-hash".to_string(),
+        )
+        .unwrap();
+
+        let renamed = file.with_name("renamed.txt".to_string()).unwrap();
+        assert_eq!(renamed.content_hash(), "stable-content-hash");
     }
 }

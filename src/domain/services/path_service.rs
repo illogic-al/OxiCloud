@@ -5,6 +5,29 @@
 //! infrastructure/services/path_service.rs because it has file system dependencies.
 
 use std::path::PathBuf;
+use unicode_normalization::UnicodeNormalization;
+
+/// NFC-normalize a single file or folder name component.
+///
+/// The storage layer (PostgreSQL `storage.files.name` and
+/// `storage.folders.name`) compares bytes literally — there is no
+/// Unicode-aware collation in either UNIQUE index. macOS APFS stores
+/// filenames in NFD (decomposed: `é` = `e` + U+0301), while browsers
+/// and most other clients post NFC (`é` = U+00E9). Without
+/// normalization, the same logical filename can land as two distinct
+/// rows: one from a web upload, one from a NextCloud desktop client
+/// re-upload of the round-tripped name. The UNIQUE index does not
+/// catch it because the bytes differ.
+///
+/// This function is called at every name-receiving boundary (entity
+/// constructors, repository path lookups) so the database invariant
+/// becomes "every stored name is NFC". A one-shot migration
+/// (`migrate-nfc-filenames`) cleans up rows that pre-date this rule.
+///
+/// Pure function — no I/O, allocates one `String`.
+pub fn normalize_storage_name(name: &str) -> String {
+    name.nfc().collect()
+}
 
 /// Validates a single file or folder name component.
 ///
@@ -250,5 +273,44 @@ mod tests {
         // but regardless, our from() only accepts Component::Normal
         assert!(!path.segments().contains(&"..".to_string()));
         assert!(!path.segments().contains(&".".to_string()));
+    }
+
+    // ── NFC normalization tests ─────────────────────────────────
+
+    /// Plain ASCII names must round-trip identical bytes.
+    #[test]
+    fn test_normalize_ascii_unchanged() {
+        assert_eq!(normalize_storage_name("file.txt"), "file.txt");
+        assert_eq!(normalize_storage_name("My Documents"), "My Documents");
+    }
+
+    /// The macOS APFS / NextCloud-desktop pathological case: `é`
+    /// decomposed as `e` + combining acute (U+0301). Stored bytes
+    /// `65 cc 81` collapse to NFC `c3 a9`.
+    #[test]
+    fn test_normalize_nfd_to_nfc() {
+        let nfd = "caf\u{0065}\u{0301}";
+        let nfc = "caf\u{00E9}";
+        assert_ne!(nfd.as_bytes(), nfc.as_bytes());
+        assert_eq!(normalize_storage_name(nfd), nfc);
+    }
+
+    /// Already-NFC input must round-trip unchanged. This is the
+    /// idempotence property the boundary normalization relies on.
+    #[test]
+    fn test_normalize_nfc_idempotent() {
+        let nfc = "Capture d\u{2019}\u{00E9}cran.png";
+        assert_eq!(normalize_storage_name(nfc), nfc);
+        // And applying twice is the same as once.
+        assert_eq!(normalize_storage_name(&normalize_storage_name(nfc)), nfc);
+    }
+
+    /// Multi-codepoint NFD sequences (combining acute + grave +
+    /// typographic apostrophe) all converge to a single NFC form.
+    #[test]
+    fn test_normalize_mixed_accents() {
+        let nfd = "Capture d\u{2019}\u{0065}\u{0301}cran a\u{0300}.png";
+        let nfc = "Capture d\u{2019}\u{00E9}cran \u{00E0}.png";
+        assert_eq!(normalize_storage_name(nfd), nfc);
     }
 }

@@ -21,6 +21,7 @@ use crate::application::ports::file_ports::FileRetrievalUseCase;
 use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::inbound::SearchUseCase;
 use crate::common::di::AppState;
+use crate::domain::entities::file::File;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::CurrentUser;
 use crate::interfaces::nextcloud::webdav_handler::{
@@ -250,6 +251,16 @@ async fn handle_search(
 
 /// Build a `FileDto` from a search file result.
 fn file_dto_from_search(fr: &crate::application::dtos::search_dto::SearchFileResultDto) -> FileDto {
+    // Route ETag through `File::compute_etag` so REPORT/SEARCH hits
+    // emit the same opaque token NC's sync client cached from the
+    // earlier PROPFIND walk — without this, NC's conditional-request
+    // logic on search results disagrees with its own cached state
+    // and triggers a spurious re-fetch.
+    let etag = if fr.blob_hash.is_empty() {
+        String::new()
+    } else {
+        File::compute_etag(&fr.blob_hash, fr.modified_at)
+    };
     FileDto {
         id: fr.id.clone(),
         name: fr.name.clone(),
@@ -267,7 +278,8 @@ fn file_dto_from_search(fr: &crate::application::dtos::search_dto::SearchFileRes
         size_formatted: format_file_size(fr.size),
         owner_id: None,
         sort_date: None,
-        etag: String::new(),
+        content_hash: fr.blob_hash.clone(),
+        etag,
     }
 }
 
@@ -276,6 +288,7 @@ fn folder_dto_from_search(
     sr: &crate::application::dtos::search_dto::SearchFolderResultDto,
 ) -> FolderDto {
     FolderDto {
+        etag: sr.id.clone(),
         id: sr.id.clone(),
         name: sr.name.clone(),
         path: sr.path.clone(),

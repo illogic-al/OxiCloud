@@ -146,6 +146,18 @@ MIME=$(jq -r '.mime_type' <<< "$LISTED_FILE")
     || fail "Expected MIME type video/mp4, got: $MIME"
 pass "File listed with MIME type: $MIME"
 
+# ── Step 4b: server's content_hash matches our local BLAKE3 ──────────────────
+# Cross-check the file we just uploaded: the server's view of its
+# content identity (FileDto.content_hash, exposed in REST JSON since
+# the etag-centralization refactor) must equal the BLAKE3 we know
+# the fixture has. Catches any chunk-assembly bug that would
+# silently produce a different blob than the source bytes.
+
+LISTED_HASH=$(jq -r '.content_hash // empty' <<< "$LISTED_FILE")
+[[ "$LISTED_HASH" == "$BLOB_HASH" ]] \
+    || fail "content_hash mismatch: server=$LISTED_HASH expected=$BLOB_HASH"
+pass "content_hash matches local BLAKE3 ($BLOB_HASH)"
+
 # ── Step 5: Dedup check → ref_count == 1 ─────────────────────────────────────
 
 echo "  step 5: GET /api/dedup/check/$BLOB_HASH..."

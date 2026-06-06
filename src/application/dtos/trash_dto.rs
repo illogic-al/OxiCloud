@@ -61,6 +61,12 @@ pub struct TrashResourceRow {
     pub resource_created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
     pub owner_id: Uuid,
+    /// Raw BLAKE3 content hash. `Some(_)` for file rows, `None` for
+    /// folder rows. Feeds `File::compute_etag` so the trash listing's
+    /// `etag` matches what GET/HEAD/PROPFIND would return for the
+    /// same file (restorable trash items are conditional-request
+    /// targets too).
+    pub blob_hash: Option<String>,
     pub trashed_at: DateTime<Utc>,
     pub deletion_date: DateTime<Utc>,
     /// Original location path (for folders: `path`; for files: `parent.path || '/' || name`).

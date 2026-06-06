@@ -141,6 +141,22 @@ FILE_B_ID=$(jq -r --arg n "$FILE_B" '.[] | select(.name == $n) | .id' <<< "$LIST
     || fail "File A and B share the same ID — dedup must create two distinct records"
 pass "Two distinct file records: A=$FILE_A_ID  B=$FILE_B_ID"
 
+# ── Step 2b: server's content_hash matches our local BLAKE3 for both ─────────
+# Both files were uploaded from byte-identical bytes, so the server
+# MUST report the same content_hash for both — and that hash MUST
+# equal the BLAKE3 we computed locally. Without this check, a
+# subtle CDC-assembly bug could produce two distinct blobs that
+# happen to map to the same dedup key but differ from the source —
+# the ref_count assertions below would still pass.
+
+FILE_A_HASH=$(jq -r --arg n "$FILE_A" '.[] | select(.name == $n) | .content_hash // empty' <<< "$LISTING")
+FILE_B_HASH=$(jq -r --arg n "$FILE_B" '.[] | select(.name == $n) | .content_hash // empty' <<< "$LISTING")
+[[ "$FILE_A_HASH" == "$BLOB_HASH" ]] \
+    || fail "content_hash mismatch for A: server=$FILE_A_HASH expected=$BLOB_HASH"
+[[ "$FILE_B_HASH" == "$BLOB_HASH" ]] \
+    || fail "content_hash mismatch for B: server=$FILE_B_HASH expected=$BLOB_HASH"
+pass "content_hash on both A and B matches local BLAKE3 ($BLOB_HASH)"
+
 # ── Step 3: ref_count == 2 ────────────────────────────────────────────────────
 
 echo "  step 3: dedup/check → expect ref_count=2..."

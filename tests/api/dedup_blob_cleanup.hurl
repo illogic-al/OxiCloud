@@ -90,6 +90,12 @@ file1_id: jsonpath "$.id"
 [Asserts]
 jsonpath "$.name" == "dedup-test.jpg"
 jsonpath "$.folder_id" == {{test_folder_id}}
+# Cross-check that the server's view of the uploaded content matches
+# the BLAKE3 we computed locally over fixtures/dedup-test.jpg. The
+# `content_hash` field is the raw blob hash, distinct from `etag`
+# (which folds in modified_at) — exposed in REST JSON by the
+# etag-centralization refactor.
+jsonpath "$.content_hash" == "cde1ca663a2e62e0dadb41c3194e11ecb7d971d84c7451db17063b55c09e8066"
 
 
 # ref_count == 1: blob has exactly one file reference after first upload
@@ -118,6 +124,10 @@ file2_id: jsonpath "$.id"
 [Asserts]
 jsonpath "$.name" == "dedup-test-2.jpg"
 jsonpath "$.id" != "{{file1_id}}"
+# Same content as fixtures/dedup-test.jpg → identical content_hash.
+# This is the actual "dedup happened" assertion at the API surface,
+# independent of the /api/dedup/check probe below.
+jsonpath "$.content_hash" == "cde1ca663a2e62e0dadb41c3194e11ecb7d971d84c7451db17063b55c09e8066"
 
 
 # ref_count == 2: dedup hit — same blob now referenced by two file records

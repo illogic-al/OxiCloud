@@ -593,7 +593,11 @@ impl FileHandler {
                 .into_response();
         }
 
-        let etag = format!("\"{}-{}\"", id, file_dto.modified_at);
+        // Route through `FileDto::etag` so this REST download
+        // endpoint, WebDAV/NextCloud GET, HEAD, PROPFIND, and PUT all
+        // emit the same opaque token for the same file — see
+        // `File::etag` for the formula.
+        let etag = format!("\"{}\"", file_dto.etag);
 
         // ── ETag (304 Not Modified) ──────────────────────────────────
         if let Some(inm) = headers.get(header::IF_NONE_MATCH)

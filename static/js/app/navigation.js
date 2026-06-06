@@ -270,7 +270,20 @@ function switchToSharedWithMeSection() {
     sharedWithMeView.init();
 }
 
-function switchToFilesSection() {
+/**
+ * Switch the UI into the Files section.
+ *
+ * @param {Object}  [options]
+ * @param {boolean} [options.preservePath=false]
+ *   When true, keep the current `app.currentPath` instead of resetting
+ *   to the home folder. Used on initial page load with a hash-driven
+ *   path (e.g. `#/files/folder/<uuid>`) so the section switch doesn't
+ *   clobber the path the caller has just set from the URL. Without
+ *   this flag, the unconditional reset races with `loadFiles()`
+ *   (which is also kicked off from here) and the home-folder URL
+ *   wins, redirecting the user back to root on every other refresh.
+ */
+function switchToFilesSection({ preservePath = false } = {}) {
     if (!setCurrentSection('files')) return;
 
     // Set actions bar mode
@@ -299,12 +312,13 @@ function switchToFilesSection() {
     //reset files view + remove any error
     ui.resetFilesList();
 
-    // Reset to home folder and update breadcrumb. External users have no
-    // home — leave `currentPath` as the caller set it (e.g. the magic-link
+    // Reset to home folder unless the caller has pre-set a path (the
+    // `preservePath` opt-in). External users have no home — leave
+    // `currentPath` as the caller set it (e.g. the magic-link
     // landing's hash context) so loadFiles() doesn't fall through to
-    // `/api/folders//resources`. If `currentPath` is still empty by the
-    // time loadFiles() runs, it self-redirects to /#/sharedwithme.
-    if (!app.isExternalUser) {
+    // `/api/folders//resources`. If `currentPath` is still empty by
+    // the time loadFiles() runs, it self-redirects to /#/sharedwithme.
+    if (!app.isExternalUser && !preservePath) {
         app.currentPath = app.userHomeFolderId || '';
         app.breadcrumbPath = [];
     }

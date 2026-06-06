@@ -26,6 +26,7 @@ use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::application::services::folder_service::FolderService;
 use crate::common::di::AppState as GlobalAppState;
+use crate::domain::entities::file::File;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 
@@ -692,8 +693,10 @@ pub async fn list_folder_resources(
                 .into_iter()
                 .map(|row| {
                     if row.resource_type == "folder" {
+                        let resource_id = row.id.to_string();
                         let dto = FolderDto {
-                            id: row.id.to_string(),
+                            etag: resource_id.clone(),
+                            id: resource_id,
                             name: row.name.clone(),
                             path: String::new(), // cleared — share recipients must not see hierarchy
                             parent_id: row.parent_id.map(|u| u.to_string()),
@@ -715,6 +718,20 @@ pub async fn list_folder_resources(
                             .as_deref()
                             .unwrap_or("application/octet-stream");
                         let size_bytes = row.size.max(0) as u64;
+                        // `blob_hash` is `Some(_)` for file rows in the
+                        // UNION ALL (`NULL` for folders). Route the
+                        // ETag formula through `File::compute_etag` —
+                        // the single source of truth shared with
+                        // GET/HEAD/PROPFIND/PUT response — so this
+                        // listing's `etag` byte-equals what a
+                        // conditional request would compare against.
+                        let modified_at_u = row.modified_at.timestamp() as u64;
+                        let content_hash = row.blob_hash.clone().unwrap_or_default();
+                        let etag = if content_hash.is_empty() {
+                            String::new()
+                        } else {
+                            File::compute_etag(&content_hash, modified_at_u)
+                        };
                         let dto = FileDto {
                             id: row.id.to_string(),
                             name: row.name.clone(),
@@ -730,7 +747,8 @@ pub async fn list_folder_resources(
                             size_formatted: format_file_size(size_bytes),
                             owner_id: Some(row.owner_id.to_string()),
                             sort_date: None,
-                            etag: String::new(),
+                            content_hash,
+                            etag,
                         };
                         FolderResourceItemDto {
                             resource_type: ResourceTypeDto::File,

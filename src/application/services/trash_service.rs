@@ -17,6 +17,7 @@ use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::storage_ports::{FileReadPort, FileWritePort};
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::errors::{DomainError, ErrorKind, Result};
+use crate::domain::entities::file::File;
 use crate::domain::entities::trashed_item::{TrashedItem, TrashedItemType};
 use crate::domain::repositories::folder_repository::FolderRepository;
 use crate::domain::repositories::trash_repository::TrashRepository;
@@ -809,8 +810,10 @@ fn build_trash_cursor(row: &TrashResourceRow, order_by: &str, reverse: bool) -> 
 fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
     let path = row.path.clone().unwrap_or_default();
     if row.resource_type == "folder" {
+        let resource_id = row.resource_id.to_string();
         let dto = FolderDto {
-            id: row.resource_id.to_string(),
+            etag: resource_id.clone(),
+            id: resource_id,
             name: row.name.clone(),
             path,
             parent_id: row.parent_id.map(|u| u.to_string()),
@@ -834,6 +837,16 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
             .as_deref()
             .unwrap_or("application/octet-stream");
         let size_bytes = row.size.max(0) as u64;
+        // Route ETag through `File::compute_etag` so trash items
+        // match GET/HEAD/PROPFIND ETags — a client restoring a
+        // file may conditional-request it immediately after.
+        let modified_at_u = row.modified_at.timestamp() as u64;
+        let content_hash = row.blob_hash.clone().unwrap_or_default();
+        let etag = if content_hash.is_empty() {
+            String::new()
+        } else {
+            File::compute_etag(&content_hash, modified_at_u)
+        };
         let dto = FileDto {
             id: row.resource_id.to_string(),
             name: row.name.clone(),
@@ -842,14 +855,15 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
             mime_type: std::sync::Arc::from(mime),
             folder_id: row.parent_id.map(|u| u.to_string()),
             created_at: row.resource_created_at.timestamp() as u64,
-            modified_at: row.modified_at.timestamp() as u64,
+            modified_at: modified_at_u,
             icon_class: std::sync::Arc::from(icon_class_for(&row.name, mime)),
             icon_special_class: std::sync::Arc::from(icon_special_class_for(&row.name, mime)),
             category: std::sync::Arc::from(category_for(&row.name, mime)),
             size_formatted: format_file_size(size_bytes),
             owner_id: Some(row.owner_id.to_string()),
             sort_date: None,
-            etag: String::new(),
+            content_hash,
+            etag,
         };
         TrashResourceItemDto {
             resource_type: ResourceTypeDto::File,

@@ -127,6 +127,13 @@ pub struct SearchFileResultDto {
     pub icon_special_class: String,
     /// Content category: "document", "image", "video", "audio", "archive", "code", "other"
     pub category: String,
+    /// Raw BLAKE3 content hash. Feeds `FileDto::content_hash` and
+    /// `File::compute_etag` when search results are converted to
+    /// `FileDto` (NC REPORT/SEARCH response). Defaults to `String::new()`
+    /// for backward-compatible deserialisation of cached results
+    /// that pre-date the column.
+    #[serde(default)]
+    pub blob_hash: String,
 }
 
 /// A folder search result enriched with server-computed metadata

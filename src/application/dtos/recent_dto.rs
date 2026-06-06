@@ -105,6 +105,10 @@ pub struct RecentResourceRow {
     pub resource_created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
     pub owner_id: Uuid,
+    /// Raw BLAKE3 content hash. `Some(_)` for file rows, `None` for
+    /// folder rows. Feeds `File::compute_etag` so this listing's
+    /// `etag` matches GET/HEAD/PROPFIND for the same file.
+    pub blob_hash: Option<String>,
     /// `true` when `owner_id == requesting user_id`.
     pub is_owner: bool,
     pub accessed_at: DateTime<Utc>,

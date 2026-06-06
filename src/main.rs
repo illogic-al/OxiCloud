@@ -451,21 +451,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .merge(caldav_protected)
             .merge(carddav_protected)
             .merge(webdav_protected)
-            .merge(web_routes)
-            .layer(
-                TraceLayer::new_for_http()
-                    .make_span_with(ClientIpMakeSpan)
-                    .on_response(LogBadRequest),
-            )
-            .layer(PropagateRequestIdLayer::x_request_id())
-            .layer(SetRequestIdLayer::x_request_id(UuidRequestId));
+            .merge(web_routes);
 
-        // Mount Nextcloud routes (uses its own Basic Auth middleware)
+        // Mount Nextcloud routes (uses its own Basic Auth middleware).
+        // **Merged BEFORE the trace + request-id layers** so NC requests
+        // get the same `request_id` / `user_id` / `client_ip` span
+        // fields as every other surface — see
+        // `interfaces/middleware/trace_span.rs::ClientIpMakeSpan`.
         if let Some(nc_router) = nextcloud_router {
             app = app.merge(nc_router.with_state(app_state.clone()));
         }
 
-        // Mount WOPI routes (protocol routes use own token auth, API routes behind auth middleware)
+        // Mount WOPI routes (protocol routes use own token auth, API routes behind auth middleware).
+        // Same reasoning as NC above: merge before the trace layer so
+        // WOPI requests appear in the structured log channel.
         if let Some((wopi_protocol, wopi_api)) = wopi_routes {
             let wopi_api_protected = wopi_api
                 .layer(axum::middleware::from_fn(csrf_middleware))
@@ -477,6 +476,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .nest("/wopi", wopi_protocol)
                 .nest("/api/wopi", wopi_api_protected);
         }
+
+        // ── Trace + request-id layers applied LAST so every route
+        //    merged above (including the conditional NC and WOPI
+        //    surfaces) is wrapped. New protocol routers added later
+        //    only have to be merged before this point to get tracing
+        //    for free — no second site to remember to update.
+        app = app
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(ClientIpMakeSpan)
+                    .on_response(LogBadRequest),
+            )
+            .layer(PropagateRequestIdLayer::x_request_id())
+            .layer(SetRequestIdLayer::x_request_id(UuidRequestId));
     } else {
         // Auth disabled — no middleware applied
         tracing::warn!("Authentication is DISABLED — all API routes are publicly accessible");
@@ -491,7 +504,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .merge(caldav_router)
             .merge(carddav_router)
             .merge(webdav_router)
-            .merge(web_routes)
+            .merge(web_routes);
+
+        // Mount Nextcloud routes — merged BEFORE the trace + request-id
+        // layers so NC requests get the same span fields as every
+        // other surface (matches the auth-enabled branch above).
+        if let Some(nc_router) = nextcloud_router {
+            app = app.merge(nc_router.with_state(app_state.clone()));
+        }
+
+        // Mount WOPI routes (no auth middleware when auth is disabled).
+        // Same reasoning: merge before the trace layer.
+        if let Some((wopi_protocol, wopi_api)) = wopi_routes {
+            app = app.nest("/wopi", wopi_protocol).nest("/api/wopi", wopi_api);
+        }
+
+        // ── Trace + request-id layers applied LAST. See the
+        //    auth-enabled branch above for the rationale.
+        app = app
             .layer(
                 TraceLayer::new_for_http()
                     .make_span_with(ClientIpMakeSpan)
@@ -499,16 +529,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .layer(PropagateRequestIdLayer::x_request_id())
             .layer(SetRequestIdLayer::x_request_id(UuidRequestId));
-
-        // Mount Nextcloud routes
-        if let Some(nc_router) = nextcloud_router {
-            app = app.merge(nc_router.with_state(app_state.clone()));
-        }
-
-        // Mount WOPI routes (no auth middleware when auth is disabled)
-        if let Some((wopi_protocol, wopi_api)) = wopi_routes {
-            app = app.nest("/wopi", wopi_protocol).nest("/api/wopi", wopi_api);
-        }
     }
 
     // Increase the default body limit to allow large file uploads.

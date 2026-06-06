@@ -147,6 +147,20 @@ FILE_B_ID=$(jq -r --arg n "$FILE_B" '.[] | select(.name == $n) | .id' <<< "$FILE
     || fail "File A and B share the same ID — dedup must produce two distinct records"
 pass "Two distinct file records: A=$FILE_A_ID  B=$FILE_B_ID"
 
+# ── Step 3b: server's content_hash matches our local BLAKE3 for both ─────────
+# Both files were uploaded from byte-identical content — server's
+# `content_hash` field (exposed via the etag-centralization refactor)
+# must equal BLOB_HASH for both, proving the server's view of
+# content identity agrees with our local computation.
+
+FILE_A_HASH=$(jq -r --arg n "$FILE_A" '.[] | select(.name == $n) | .content_hash // empty' <<< "$FILE_LISTING")
+FILE_B_HASH=$(jq -r --arg n "$FILE_B" '.[] | select(.name == $n) | .content_hash // empty' <<< "$FILE_LISTING")
+[[ "$FILE_A_HASH" == "$BLOB_HASH" ]] \
+    || fail "content_hash mismatch for A: server=$FILE_A_HASH expected=$BLOB_HASH"
+[[ "$FILE_B_HASH" == "$BLOB_HASH" ]] \
+    || fail "content_hash mismatch for B: server=$FILE_B_HASH expected=$BLOB_HASH"
+pass "content_hash on both A and B matches local BLAKE3 ($BLOB_HASH)"
+
 # ── Step 4: Dedup check → ref_count == 2 ─────────────────────────────────────
 
 echo "  step 4: GET /api/dedup/check/$BLOB_HASH..."
@@ -167,6 +181,25 @@ echo "  step 5: PUT $FILE_B (oxicloud-logo.jpg, new content)..."
 STATUS=$(webdav_put "$FILE_B" "$FIXTURE_OTHER" "image/jpeg")
 [[ "$STATUS" == "204" ]] || fail "PUT $FILE_B (overwrite) expected 204, got $STATUS"
 pass "PUT $FILE_B overwrite → 204"
+
+# ── Step 5b: B's content_hash flipped, A's unchanged ─────────────────────────
+# After overwrite, B references a new blob (oxicloud-logo.jpg)
+# whose BLAKE3 differs from BLOB_HASH; A still holds the original.
+# A weaker but local-fixture-agnostic check than asserting B's new
+# exact hash (avoids hardcoding a second BLAKE3) — proves that the
+# COW-overwrite path swaps the blob identity rather than silently
+# keeping the old one.
+
+REFRESHED=$(rest_get "/api/files?folder_id=$HOME_FOLDER_ID")
+FILE_A_HASH_AFTER=$(jq -r --arg n "$FILE_A" '.[] | select(.name == $n) | .content_hash // empty' <<< "$REFRESHED")
+FILE_B_HASH_AFTER=$(jq -r --arg n "$FILE_B" '.[] | select(.name == $n) | .content_hash // empty' <<< "$REFRESHED")
+[[ "$FILE_A_HASH_AFTER" == "$BLOB_HASH" ]] \
+    || fail "File A's content_hash changed unexpectedly: $FILE_A_HASH_AFTER (overwrite of B must not touch A)"
+[[ "$FILE_B_HASH_AFTER" != "$BLOB_HASH" ]] \
+    || fail "File B's content_hash unchanged after overwrite — COW path didn't swap the blob"
+[[ -n "$FILE_B_HASH_AFTER" ]] \
+    || fail "File B has empty content_hash after overwrite — server didn't compute a new blob"
+pass "post-overwrite: A still on $BLOB_HASH, B flipped to $FILE_B_HASH_AFTER"
 
 # ── Step 6: Dedup check → ref_count == 1 ─────────────────────────────────────
 # File B now references a different blob; file A still holds the original.

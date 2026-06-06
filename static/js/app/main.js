@@ -540,8 +540,15 @@ function initApp() {
         grants.fetchIncomingGrants();
         grants.fetchOutgoingGrants();
 
-        switchSectionTo(hashContext.section);
         if (hashContext.section === 'files') {
+            // Capture the URL-derived path BEFORE the section switch.
+            // `switchToFilesSection` resets `app.currentPath` to home
+            // by default and kicks off its own `loadFiles()` — if we
+            // wrote the hash-derived path AFTER the switch, our write
+            // would race the load-already-in-flight and lose, taking
+            // the user back to root on every other refresh. Setting
+            // first + `preservePath: true` makes the switch's load
+            // start with the correct path.
             if (hashContext.path) {
                 console.log(`init: reusing folder from hash URL: ${hashContext.path}`);
                 app.currentPath = hashContext.path;
@@ -551,7 +558,11 @@ function initApp() {
                 app.viewFile = hashContext.file;
             }
 
-            loadFiles();
+            switchToFilesSection({ preservePath: true });
+            // `switchToFilesSection` already calls `loadFiles()` — do
+            // not call it again here, that would race itself.
+        } else {
+            switchSectionTo(hashContext.section);
         }
     });
 

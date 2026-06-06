@@ -172,6 +172,10 @@ impl SearchService {
             icon_class: get_icon_class(&file.name, &file.mime_type),
             icon_special_class: get_icon_special_class(&file.name, &file.mime_type),
             category: get_category(&file.name, &file.mime_type),
+            // Carry the content hash through so REPORT/SEARCH
+            // responses on the NC surface can emit the same ETag
+            // (`File::compute_etag`) as PROPFIND/GET would.
+            blob_hash: file.content_hash.clone(),
         }
     }
 

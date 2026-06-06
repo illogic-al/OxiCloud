@@ -20,6 +20,7 @@ use crate::application::dtos::folder_dto::FolderDto;
 use crate::application::dtos::grant_dto::{ResourceContentDto, ResourceTypeDto};
 use crate::application::ports::favorites_ports::FavoritesUseCase;
 use crate::application::services::favorites_service::FavoritesService;
+use crate::domain::entities::file::File;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 
@@ -253,8 +254,10 @@ pub async fn list_favorites_resources(
                     };
 
                     if row.resource_type == "folder" {
+                        let resource_id = row.resource_id.to_string();
                         let dto = FolderDto {
-                            id: row.resource_id.to_string(),
+                            etag: resource_id.clone(),
+                            id: resource_id,
                             name: row.name.clone(),
                             path,
                             parent_id: row.parent_id.map(|u| u.to_string()),
@@ -277,6 +280,18 @@ pub async fn list_favorites_resources(
                             .as_deref()
                             .unwrap_or("application/octet-stream");
                         let size_bytes = row.size.max(0) as u64;
+                        // Route ETag through `File::compute_etag` so
+                        // this listing's `etag` byte-equals what
+                        // GET/HEAD/PROPFIND would return for the same
+                        // file. `blob_hash` is `None` only for
+                        // folder rows, which take the other branch.
+                        let modified_at_u = row.modified_at.timestamp() as u64;
+                        let content_hash = row.blob_hash.clone().unwrap_or_default();
+                        let etag = if content_hash.is_empty() {
+                            String::new()
+                        } else {
+                            File::compute_etag(&content_hash, modified_at_u)
+                        };
                         let dto = FileDto {
                             id: row.resource_id.to_string(),
                             name: row.name.clone(),
@@ -285,7 +300,7 @@ pub async fn list_favorites_resources(
                             mime_type: std::sync::Arc::from(mime),
                             folder_id: row.parent_id.map(|u| u.to_string()),
                             created_at: row.resource_created_at.timestamp() as u64,
-                            modified_at: row.modified_at.timestamp() as u64,
+                            modified_at: modified_at_u,
                             icon_class: std::sync::Arc::from(icon_class_for(&row.name, mime)),
                             icon_special_class: std::sync::Arc::from(icon_special_class_for(
                                 &row.name, mime,
@@ -294,7 +309,8 @@ pub async fn list_favorites_resources(
                             size_formatted: format_file_size(size_bytes),
                             owner_id: Some(row.owner_id.to_string()),
                             sort_date: None,
-                            etag: String::new(),
+                            content_hash,
+                            etag,
                         };
                         FavoritesResourceItemDto {
                             resource_type: ResourceTypeDto::File,

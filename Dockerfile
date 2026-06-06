@@ -14,6 +14,7 @@ COPY static static
 RUN mkdir -p src/bin && \
     echo 'fn main() { println!("Dummy build for caching dependencies"); }' > src/main.rs && \
     echo 'fn main() {}' > src/bin/generate-openapi.rs && \
+    echo 'fn main() {}' > src/bin/migrate-nfc-filenames.rs && \
     cargo build --release && \
     rm -rf src static-dist target/release/deps/oxicloud* target/release/build/oxicloud-*
 
@@ -56,6 +57,12 @@ RUN apk --no-cache upgrade && \
 
 # Copy the compiled binary and entrypoint (--chmod avoids extra RUN chmod layers)
 COPY --from=builder --chmod=755 /app/target/release/oxicloud /usr/local/bin/
+# Ship the NFC filename migration binary alongside the server so
+# operators can run it inside the container without a separate Rust
+# toolchain — `docker exec <container> migrate-nfc-filenames --dry-run`
+# to preview, drop `--dry-run` to execute. One-shot tool, safe to
+# ship; it only mutates `storage.files` rows whose name ≠ NFC(name).
+COPY --from=builder --chmod=755 /app/target/release/migrate-nfc-filenames /usr/local/bin/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN sed -i 's/\r//' /usr/local/bin/entrypoint.sh && \
     chmod 755 /usr/local/bin/entrypoint.sh

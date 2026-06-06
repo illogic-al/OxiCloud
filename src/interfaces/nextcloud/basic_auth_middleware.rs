@@ -114,6 +114,15 @@ pub async fn basic_auth_middleware(
                 );
                 return Err(NextcloudAuthError::Unauthorized);
             }
+            // Populate the deferred `user_id` field on the request
+            // tracing span (declared in `middleware/trace_span.rs::ClientIpMakeSpan`).
+            // Mirrors what `interfaces/middleware/auth.rs` does for the
+            // JWT path so the two auth surfaces produce log lines with
+            // the same structured shape — without this, every NC
+            // request would appear in the logs with `user_id=-`,
+            // making it harder to correlate WebDAV / OCS activity to
+            // a specific principal.
+            tracing::Span::current().record("user_id", user_id.to_string());
             request.extensions_mut().insert(Arc::new(CurrentUser {
                 id: user_id,
                 username: uname,

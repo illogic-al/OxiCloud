@@ -125,6 +125,10 @@ pub struct FavoriteResourceRow {
     pub resource_created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
     pub owner_id: Uuid,
+    /// Raw BLAKE3 content hash. `Some(_)` for file rows, `None` for
+    /// folder rows. Routes into `FileDto::content_hash` and feeds
+    /// `File::compute_etag` to populate `FileDto::etag`.
+    pub blob_hash: Option<String>,
     /// `true` when `owner_id == requesting user_id`.
     pub is_owner: bool,
     pub favorited_at: DateTime<Utc>,
