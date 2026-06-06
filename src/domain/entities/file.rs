@@ -264,22 +264,30 @@ impl File {
     /// Opaque HTTP ETag string (raw, NOT HTTP-quoted). Handlers wrap
     /// in `"…"` themselves at the HTTP boundary.
     ///
-    /// **Current formula**: equal to [`File::content_hash`] —
-    /// content-addressable BLAKE3. Stable across renames, changes on
-    /// every content write. Every handler that emits a file ETag
-    /// header MUST route through this method (or the matching
-    /// [`FileDto::etag`] field populated from it) so `GET`, `HEAD`,
-    /// `PROPFIND`, `PUT` response, and `MOVE` all return
-    /// byte-identical values for the same file.
+    /// **Formula**: `{blob_hash[..16]}-{modified_at}`.
     ///
-    /// A follow-up PR will fold `modified_at` into the formula
-    /// (`{blob_hash[..16]}-{modified_at}`) so a `x-oc-mtime`-only
-    /// update (NextCloud preserves client mtime) invalidates client
-    /// caches even when the content bytes are unchanged. At that
-    /// point `etag()` and `content_hash()` diverge — that is the
-    /// reason they are exposed as two separate methods today.
-    pub fn etag(&self) -> &str {
-        self.content_hash()
+    /// - The 16-char BLAKE3 prefix is the content identity (64 bits
+    ///   ≈ 10⁻⁹ collision probability over 10M files).
+    /// - `modified_at` (Unix seconds) catches the `x-oc-mtime`
+    ///   case: NextCloud preserves the client-side mtime on upload,
+    ///   so a "touch-then-resync" of unchanged content still bumps
+    ///   the mtime — without the suffix the ETag wouldn't change
+    ///   and clients would serve stale metadata.
+    /// - When `blob_hash` is shorter than 16 chars (test fixtures,
+    ///   stub entities) the prefix is just the whole value.
+    /// - Folder ETags follow a separate path — see
+    ///   [`crate::domain::entities::folder::Folder::etag`].
+    ///
+    /// Every handler that emits a file ETag header MUST route
+    /// through this method (or the matching [`FileDto::etag`] field
+    /// populated from it) so `GET`, `HEAD`, `PROPFIND`, `PUT`
+    /// response, and `MOVE` all return byte-identical values for
+    /// the same file. The raw blob hash remains accessible via
+    /// [`File::content_hash`] for API consumers that need the
+    /// pre-derivation value.
+    pub fn etag(&self) -> String {
+        let prefix: String = self.blob_hash.chars().take(16).collect();
+        format!("{}-{}", prefix, self.modified_at)
     }
 
     // Getters
@@ -507,12 +515,13 @@ mod tests {
         assert_eq!(renamed.id(), "123"); // The ID does not change
     }
 
-    /// Today `etag()` and `content_hash()` return the same string
-    /// (the v1 formula is identity); the test exists to catch a
-    /// future change that accidentally lets them disagree when they
-    /// should match. PR 2 will deliberately make them diverge.
+    /// The ETag formula is `{blob_hash[..16]}-{modified_at}`. Two
+    /// fixtures with identical content + mtime must produce
+    /// byte-identical ETags — that's the invariant every handler
+    /// relies on when comparing a cached client ETag against a
+    /// freshly-loaded one.
     #[test]
-    fn test_etag_currently_equals_content_hash() {
+    fn test_etag_combines_blob_hash_prefix_and_mtime() {
         let file = File::with_timestamps_and_blob_hash(
             "id-1".to_string(),
             "file.txt".to_string(),
@@ -523,20 +532,21 @@ mod tests {
             1_000,
             2_000,
             None,
-            "abcdef0123456789".to_string(),
+            "abcdef0123456789ZZZZZZZZ".to_string(),
         )
         .unwrap();
 
-        assert_eq!(file.content_hash(), "abcdef0123456789");
-        assert_eq!(file.etag(), file.content_hash());
+        // content_hash stays raw — full blob hash, no truncation.
+        assert_eq!(file.content_hash(), "abcdef0123456789ZZZZZZZZ");
+        // etag is the 16-char prefix + "-" + mtime.
+        assert_eq!(file.etag(), "abcdef0123456789-2000");
     }
 
-    /// Renames must NOT change the content identity. Both `etag()`
-    /// and `content_hash()` are derived from `blob_hash`, which is
-    /// preserved across `with_name`. If a future refactor drops
-    /// `blob_hash` from the rename builder, this test catches it.
+    /// When the blob hash is shorter than 16 chars (test fixtures,
+    /// stub entities), the prefix degrades to "whatever is there".
+    /// Production blob hashes are always full BLAKE3 hex (64 chars).
     #[test]
-    fn test_etag_stable_across_rename() {
+    fn test_etag_short_blob_hash_uses_full_value() {
         let file = File::with_timestamps_and_blob_hash(
             "id-1".to_string(),
             "file.txt".to_string(),
@@ -547,12 +557,34 @@ mod tests {
             1_000,
             2_000,
             None,
-            "stable-hash".to_string(),
+            "shorthash".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(file.etag(), "shorthash-2000");
+    }
+
+    /// `content_hash` is the cryptographic identity of the bytes —
+    /// it must NEVER change because of metadata operations like
+    /// rename. The ETag is allowed to change (because `with_name`
+    /// bumps `modified_at`), but the content hash is not.
+    #[test]
+    fn test_content_hash_stable_across_rename() {
+        let file = File::with_timestamps_and_blob_hash(
+            "id-1".to_string(),
+            "file.txt".to_string(),
+            StoragePath::from_string("/file.txt"),
+            42,
+            "text/plain".to_string(),
+            None,
+            1_000,
+            2_000,
+            None,
+            "stable-content-hash".to_string(),
         )
         .unwrap();
 
         let renamed = file.with_name("renamed.txt".to_string()).unwrap();
-        assert_eq!(renamed.etag(), "stable-hash");
-        assert_eq!(renamed.content_hash(), "stable-hash");
+        assert_eq!(renamed.content_hash(), "stable-content-hash");
     }
 }

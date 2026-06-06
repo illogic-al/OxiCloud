@@ -79,13 +79,12 @@ pub struct FileDto {
 
 impl From<File> for FileDto {
     fn from(file: File) -> Self {
-        // Compute the HTTP ETag BEFORE consuming the entity — once
-        // `File::etag()` folds modified_at (and possibly more) into
-        // the formula, this becomes more than a string clone and
-        // must run against a live entity, not against
-        // already-extracted parts. content_hash is just the blob
-        // hash; etag is the cache token derived from it.
-        let etag = file.etag().to_string();
+        // Compute the HTTP ETag BEFORE consuming the entity —
+        // `File::etag()` derives from `blob_hash` + `modified_at`,
+        // so it must run against the live entity, not against
+        // already-extracted parts. `content_hash` is just the raw
+        // blob hash; `etag` is the cache token derived from it.
+        let etag = file.etag();
         let content_hash = file.content_hash().to_string();
 
         // Consume the entity by moving all fields — zero heap allocations
