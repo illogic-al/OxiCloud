@@ -202,10 +202,23 @@
 
 /* Styles applied whenever the cell is visible (hidden class absent).
    The .hidden utility class (display:none !important) keeps it invisible
-   by default — it is stamped directly in the HTML templates. */
+   by default — it is stamped directly in the HTML templates.
+
+   `display: flex` lets a nested `.user-vignette` (the common case
+   for an owner cell — an avatar circle plus a name) become a flex
+   child that can shrink past its intrinsic content width. The
+   `.user-vignette__name` already declares
+   `text-overflow: ellipsis`, but that only fires when the cascade
+   above it ACTUALLY constrains the width. Without flex here, the
+   vignette sized to its content and the cell clipped it flat with
+   no ellipsis. The cell's own `text-overflow` still ellipses
+   plain-text fallback content (cells without a vignette child). */
 .owner-cell {
     color: var(--color-text-secondary);
     font-size: 14px;
+    display: flex;
+    align-items: center;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
