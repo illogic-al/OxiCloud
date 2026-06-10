@@ -349,7 +349,9 @@ const fileOps = {
             }
 
             // Filter out unreadable entries (typically dropped folders/placeholders)
+            /** @type {File[]} */
             const readableFiles = [];
+            /** @type {string[]} */
             const skippedEntries = [];
             for (const f of originalFiles) {
                 // eslint-disable-next-line no-await-in-loop
@@ -386,13 +388,21 @@ const fileOps = {
 
             let uploadedCount = 0;
             let successCount = 0;
+            let quotaStop = false;
 
-            for (let i = 0; i < totalFiles; i++) {
-                const file = readableFiles[i];
+            const targetFolderId = app.currentPath || app.userHomeFolderId;
+
+            /**
+             * Upload a single readable file by index. Shared counters are
+             * mutated here; safe because JS runs the workers cooperatively
+             * (no true parallelism between awaits).
+             * @param {number} idx
+             */
+            const uploadOneFile = async (idx) => {
+                if (quotaStop) return;
+                const file = readableFiles[idx];
 
                 const formData = new FormData();
-
-                const targetFolderId = app.currentPath || app.userHomeFolderId;
                 if (targetFolderId) formData.append('folder_id', targetFolderId);
                 formData.append('file', file);
 
@@ -436,6 +446,8 @@ const fileOps = {
                         });
                     }
                     if (result.isQuotaError) {
+                        // Stop pulling new files; in-flight uploads still finish.
+                        quotaStop = true;
                         const msg = result.errorMsg || i18n.t('storage_quota_exceeded');
                         if (notifications) {
                             notifications.addNotification({
@@ -445,10 +457,27 @@ const fileOps = {
                                 text: msg
                             });
                         }
-                        break;
                     }
                 }
+            };
+
+            // Pool-based concurrency: keep up to CONCURRENCY uploads in flight
+            // instead of one at a time (mirrors uploadFolderEntries). Files are
+            // independent, so this is ~CONCURRENCY× faster for many small files.
+            const CONCURRENCY = 10;
+            let nextIdx = 0;
+            const runNext = async () => {
+                while (nextIdx < totalFiles && !quotaStop) {
+                    const idx = nextIdx++;
+                    await uploadOneFile(idx);
+                }
+            };
+
+            const workers = [];
+            for (let w = 0; w < Math.min(CONCURRENCY, totalFiles); w++) {
+                workers.push(runNext());
             }
+            await Promise.all(workers);
 
             // All done
             this._finishUploadToast(successCount, totalFiles);
