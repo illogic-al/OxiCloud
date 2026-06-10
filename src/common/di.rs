@@ -657,6 +657,25 @@ impl AppServiceFactory {
         service
     }
 
+    /// Starts the tree-ETag flush job (requires database).
+    ///
+    /// The statement triggers on `storage.files`/`storage.folders` only
+    /// enqueue bump requests into `storage.tree_etag_dirty` (so user-facing
+    /// writes take no folder-row locks); this job is the single drainer that
+    /// turns them into `tree_modified_at` updates. It must run whenever the
+    /// database is up — the triggers are always installed, and an undrained
+    /// queue grows unboundedly while folder ETags freeze. Fire-and-forget on
+    /// the maintenance pool, like the trash cleanup job.
+    fn start_tree_etag_flush_job(&self, maintenance_pool: &Arc<PgPool>) {
+        let service =
+            crate::infrastructure::services::tree_etag_flush_service::TreeEtagFlushService::new(
+                maintenance_pool.clone(),
+                self.config.storage.tree_etag_flush_ms,
+            );
+        service.start_flush_job();
+        tracing::info!("Tree-ETag flush service initialized");
+    }
+
     /// Builds the complete AppState using all factory services.
     ///
     /// This is the main entry point that replaces all manual logic in `main.rs`.
@@ -744,6 +763,8 @@ impl AppServiceFactory {
 
             storage_usage_service =
                 Some(self.create_storage_usage_service(&repos, &pool, &maintenance_pool));
+
+            self.start_tree_etag_flush_job(&maintenance_pool);
 
             // User-lifecycle dispatcher. Hook order is registration order;
             // document dependencies inline if/when any arise. Today:

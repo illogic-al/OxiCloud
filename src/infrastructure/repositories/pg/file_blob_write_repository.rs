@@ -20,6 +20,7 @@ use crate::domain::entities::file::File;
 use crate::domain::services::path_service::StoragePath;
 
 use super::folder_db_repository::FolderDbRepository;
+use super::transaction_utils::retry_on_deadlock;
 use crate::infrastructure::services::dedup_service::DedupService;
 
 /// File write repository backed by PostgreSQL metadata + blob storage.
@@ -157,24 +158,28 @@ impl FileBlobWriteRepository {
         modified_at: Option<i64>,
     ) -> Result<(String, i64), DomainError> {
         // Atomic CTE: capture old hash then update in one round-trip, no TOCTOU.
-        let (old_hash, updated_at) = match sqlx::query_as::<_, (String, i64)>(
-            r#"
-            WITH old AS (
-                SELECT id, blob_hash FROM storage.files WHERE id = $3::uuid FOR UPDATE
+        // Deadlock victims (40P01) retry before the compensation below runs —
+        // a successful retry must keep the new blob reference alive.
+        let (old_hash, updated_at) = match retry_on_deadlock("files.swap_blob_hash", || {
+            sqlx::query_as::<_, (String, i64)>(
+                r#"
+                WITH old AS (
+                    SELECT id, blob_hash FROM storage.files WHERE id = $3::uuid FOR UPDATE
+                )
+                UPDATE storage.files f
+                   SET blob_hash = $1, size = $2,
+                       updated_at = COALESCE(to_timestamp($4), NOW())
+                  FROM old
+                 WHERE f.id = old.id
+                RETURNING old.blob_hash, EXTRACT(EPOCH FROM f.updated_at)::bigint
+                "#,
             )
-            UPDATE storage.files f
-               SET blob_hash = $1, size = $2,
-                   updated_at = COALESCE(to_timestamp($4), NOW())
-              FROM old
-             WHERE f.id = old.id
-            RETURNING old.blob_hash, EXTRACT(EPOCH FROM f.updated_at)::bigint
-            "#,
-        )
-        .bind(new_hash)
-        .bind(new_size)
-        .bind(file_id)
-        .bind(modified_at.map(|t| t as f64))
-        .fetch_optional(self.pool.as_ref())
+            .bind(new_hash)
+            .bind(new_size)
+            .bind(file_id)
+            .bind(modified_at.map(|t| t as f64))
+            .fetch_optional(self.pool.as_ref())
+        })
         .await
         {
             Ok(Some(row)) => row,
@@ -236,23 +241,30 @@ impl FileBlobWriteRepository {
         let is_new_blob = !dedup_result.was_deduplicated();
         let blob_hash = dedup_result.hash().to_string();
 
-        let row = match sqlx::query_as::<_, (String, i64, i64)>(
-            r#"
-            INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
-            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
-            RETURNING id::text,
-                      EXTRACT(EPOCH FROM created_at)::bigint,
-                      EXTRACT(EPOCH FROM updated_at)::bigint
-            "#,
-        )
-        .bind(&name)
-        .bind(&folder_id)
-        .bind(user_id)
-        .bind(&blob_hash)
-        .bind(size as i64)
-        .bind(&content_type)
-        .bind(category_order_for(&name, &content_type))
-        .fetch_one(self.pool.as_ref())
+        // Deadlock victims (40P01) retry before the compensation below runs —
+        // a successful retry must keep the blob reference alive. The final
+        // attempt's error falls through untouched so the 23505 mapping holds
+        // (a retried INSERT can legitimately lose to a concurrent identical
+        // upload).
+        let row = match retry_on_deadlock("files.insert", || {
+            sqlx::query_as::<_, (String, i64, i64)>(
+                r#"
+                INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
+                VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
+                RETURNING id::text,
+                          EXTRACT(EPOCH FROM created_at)::bigint,
+                          EXTRACT(EPOCH FROM updated_at)::bigint
+                "#,
+            )
+            .bind(&name)
+            .bind(&folder_id)
+            .bind(user_id)
+            .bind(&blob_hash)
+            .bind(size as i64)
+            .bind(&content_type)
+            .bind(category_order_for(&name, &content_type))
+            .fetch_one(self.pool.as_ref())
+        })
         .await
         {
             Ok(row) => row,
@@ -372,46 +384,48 @@ impl FileWritePort for FileBlobWriteRepository {
         // Single round-trip; blob content is NOT copied (dedup makes this zero-copy).
         let target_fid = target_folder_id.clone();
 
-        let row = sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                Option<String>,
-                i64,
-                String,
-                i64,
-                i64,
-                String,
-            ),
-        >(
-            r#"
-            WITH src AS (
-                SELECT name, folder_id, user_id, blob_hash, size, mime_type, category_order
-                  FROM storage.files
-                 WHERE id = $1::uuid AND NOT is_trashed
-            ),
-            new_file AS (
-                INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
-                SELECT name,
-                       COALESCE($2::uuid, folder_id),
-                       user_id,
-                       blob_hash,
-                       size,
-                       mime_type,
-                       category_order
-                  FROM src
-                RETURNING id::text, name, folder_id::text, size, mime_type,
-                          EXTRACT(EPOCH FROM created_at)::bigint,
-                          EXTRACT(EPOCH FROM updated_at)::bigint,
-                          blob_hash
+        let row = retry_on_deadlock("files.copy", || {
+            sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    Option<String>,
+                    i64,
+                    String,
+                    i64,
+                    i64,
+                    String,
+                ),
+            >(
+                r#"
+                WITH src AS (
+                    SELECT name, folder_id, user_id, blob_hash, size, mime_type, category_order
+                      FROM storage.files
+                     WHERE id = $1::uuid AND NOT is_trashed
+                ),
+                new_file AS (
+                    INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
+                    SELECT name,
+                           COALESCE($2::uuid, folder_id),
+                           user_id,
+                           blob_hash,
+                           size,
+                           mime_type,
+                           category_order
+                      FROM src
+                    RETURNING id::text, name, folder_id::text, size, mime_type,
+                              EXTRACT(EPOCH FROM created_at)::bigint,
+                              EXTRACT(EPOCH FROM updated_at)::bigint,
+                              blob_hash
+                )
+                SELECT * FROM new_file
+                "#,
             )
-            SELECT * FROM new_file
-            "#,
-        )
-        .bind(file_id)
-        .bind(&target_fid)
-        .fetch_optional(self.pool.as_ref())
+            .bind(file_id)
+            .bind(&target_fid)
+            .fetch_optional(self.pool.as_ref())
+        })
         .await
         .map_err(|e| {
             if let sqlx::Error::Database(ref db_err) = e
@@ -557,23 +571,25 @@ impl FileWritePort for FileBlobWriteRepository {
         // The write-behind cache will call update_file_content later.
         let placeholder_hash = "0000000000000000000000000000000000000000000000000000000000000000";
 
-        let row = sqlx::query_as::<_, (String, i64, i64)>(
-            r#"
-            INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
-            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
-            RETURNING id::text,
-                      EXTRACT(EPOCH FROM created_at)::bigint,
-                      EXTRACT(EPOCH FROM updated_at)::bigint
-            "#,
-        )
-        .bind(&name)
-        .bind(&folder_id)
-        .bind(user_id)
-        .bind(placeholder_hash)
-        .bind(size as i64)
-        .bind(&content_type)
-        .bind(category_order_for(&name, &content_type))
-        .fetch_one(self.pool.as_ref())
+        let row = retry_on_deadlock("files.insert_deferred", || {
+            sqlx::query_as::<_, (String, i64, i64)>(
+                r#"
+                INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
+                VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
+                RETURNING id::text,
+                          EXTRACT(EPOCH FROM created_at)::bigint,
+                          EXTRACT(EPOCH FROM updated_at)::bigint
+                "#,
+            )
+            .bind(&name)
+            .bind(&folder_id)
+            .bind(user_id)
+            .bind(placeholder_hash)
+            .bind(size as i64)
+            .bind(&content_type)
+            .bind(category_order_for(&name, &content_type))
+            .fetch_one(self.pool.as_ref())
+        })
         .await
         .map_err(|e| DomainError::internal_error("FileBlobWrite", format!("deferred: {e}")))?;
 

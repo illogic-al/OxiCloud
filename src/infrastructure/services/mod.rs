@@ -29,6 +29,7 @@ pub mod thumbnail_service;
 #[cfg(test)]
 mod thumbnail_service_test;
 pub mod trash_cleanup_service;
+pub mod tree_etag_flush_service;
 pub mod webdav_lock_service;
 pub mod wopi_discovery_service;
 pub mod zip_service;

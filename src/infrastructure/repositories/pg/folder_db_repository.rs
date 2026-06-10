@@ -12,6 +12,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use super::transaction_utils::retry_on_deadlock;
 use crate::application::dtos::folder_dto::{FolderResourceCursor, FolderResourceRow};
 use crate::common::errors::DomainError;
 use crate::domain::entities::folder::Folder;
@@ -450,20 +451,25 @@ impl FolderRepository for FolderDbRepository {
         // The BEFORE UPDATE trigger recomputes path/lpath for this row;
         // the AFTER UPDATE cascade trigger then batch-updates all
         // descendants in a single UPDATE using the GiST lpath index.
-        let row = sqlx::query_as::<_, FolderRow>(
-            r#"
-            UPDATE storage.folders
-               SET name = $1, updated_at = NOW()
-             WHERE id = $2::uuid AND NOT is_trashed
-            RETURNING id::text, name, path, parent_id::text, user_id,
-                      EXTRACT(EPOCH FROM created_at)::bigint,
-                      EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint
-            "#,
-        )
-        .bind(&new_name)
-        .bind(id)
-        .fetch_optional(self.pool())
+        // That multi-row rewrite can deadlock against the tree-ETag
+        // flusher's id-ordered ancestor bump — retry instead of failing
+        // the user's operation (40P01 only; 23505 still maps below).
+        let row = retry_on_deadlock("folders.rename", || {
+            sqlx::query_as::<_, FolderRow>(
+                r#"
+                UPDATE storage.folders
+                   SET name = $1, updated_at = NOW()
+                 WHERE id = $2::uuid AND NOT is_trashed
+                RETURNING id::text, name, path, parent_id::text, user_id,
+                          EXTRACT(EPOCH FROM created_at)::bigint,
+                          EXTRACT(EPOCH FROM updated_at)::bigint,
+                           EXTRACT(EPOCH FROM tree_modified_at)::bigint
+                "#,
+            )
+            .bind(&new_name)
+            .bind(id)
+            .fetch_optional(self.pool())
+        })
         .await
         .map_err(|e| {
             if let sqlx::Error::Database(ref db_err) = e
@@ -486,20 +492,23 @@ impl FolderRepository for FolderDbRepository {
         // The BEFORE UPDATE trigger recomputes path/lpath for this row;
         // the AFTER UPDATE cascade trigger then batch-updates all
         // descendants in a single UPDATE using the GiST lpath index.
-        let row = sqlx::query_as::<_, FolderRow>(
-            r#"
-            UPDATE storage.folders
-               SET parent_id = $1::uuid, updated_at = NOW()
-             WHERE id = $2::uuid AND NOT is_trashed
-            RETURNING id::text, name, path, parent_id::text, user_id,
-                      EXTRACT(EPOCH FROM created_at)::bigint,
-                      EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint
-            "#,
-        )
-        .bind(new_parent_id)
-        .bind(id)
-        .fetch_optional(self.pool())
+        // Retried on deadlock vs the tree-ETag flusher (see rename_folder).
+        let row = retry_on_deadlock("folders.move", || {
+            sqlx::query_as::<_, FolderRow>(
+                r#"
+                UPDATE storage.folders
+                   SET parent_id = $1::uuid, updated_at = NOW()
+                 WHERE id = $2::uuid AND NOT is_trashed
+                RETURNING id::text, name, path, parent_id::text, user_id,
+                          EXTRACT(EPOCH FROM created_at)::bigint,
+                          EXTRACT(EPOCH FROM updated_at)::bigint,
+                           EXTRACT(EPOCH FROM tree_modified_at)::bigint
+                "#,
+            )
+            .bind(new_parent_id)
+            .bind(id)
+            .fetch_optional(self.pool())
+        })
         .await
         .map_err(|e| DomainError::internal_error("FolderDb", format!("move: {e}")))?
         .ok_or_else(|| DomainError::not_found("Folder", id))?;
@@ -511,24 +520,30 @@ impl FolderRepository for FolderDbRepository {
         // Delete all files whose folder is anywhere in the subtree.
         // Uses the GiST-indexed ltree `<@` operator — O(log N) vs the
         // O(depth × N) recursive CTE it replaces.
-        sqlx::query(
-            "DELETE FROM storage.files \
-              WHERE folder_id IN ( \
-                  SELECT id FROM storage.folders \
-                   WHERE lpath <@ (SELECT lpath FROM storage.folders WHERE id = $1::uuid) \
-              )",
-        )
-        .bind(id)
-        .execute(self.pool())
+        // Both statements retried on deadlock vs the tree-ETag flusher's
+        // id-ordered ancestor bump (multi-row exclusive locks).
+        retry_on_deadlock("folders.delete_files", || {
+            sqlx::query(
+                "DELETE FROM storage.files \
+                  WHERE folder_id IN ( \
+                      SELECT id FROM storage.folders \
+                       WHERE lpath <@ (SELECT lpath FROM storage.folders WHERE id = $1::uuid) \
+                  )",
+            )
+            .bind(id)
+            .execute(self.pool())
+        })
         .await
         .map_err(|e| DomainError::internal_error("FolderDb", format!("delete files: {e}")))?;
 
         // Then delete the folder (CASCADE will remove descendant folders)
-        let result = sqlx::query("DELETE FROM storage.folders WHERE id = $1::uuid")
-            .bind(id)
-            .execute(self.pool())
-            .await
-            .map_err(|e| DomainError::internal_error("FolderDb", format!("delete: {e}")))?;
+        let result = retry_on_deadlock("folders.delete", || {
+            sqlx::query("DELETE FROM storage.folders WHERE id = $1::uuid")
+                .bind(id)
+                .execute(self.pool())
+        })
+        .await
+        .map_err(|e| DomainError::internal_error("FolderDb", format!("delete: {e}")))?;
 
         if result.rows_affected() == 0 {
             return Err(DomainError::not_found("Folder", id));
@@ -570,22 +585,24 @@ impl FolderRepository for FolderDbRepository {
         // Child files and sub-folders are implicitly hidden because their
         // ancestor is trashed — list queries already filter NOT is_trashed,
         // and folder navigation won't reach a trashed folder's children.
-        let result = sqlx::query_scalar::<_, i64>(
-            r#"
-            WITH trash_folder AS (
-                UPDATE storage.folders
-                   SET is_trashed = TRUE,
-                       trashed_at = NOW(),
-                       original_parent_id = parent_id,
-                       updated_at = NOW()
-                 WHERE id = $1::uuid AND NOT is_trashed
-                RETURNING 1
+        let result = retry_on_deadlock("folders.trash", || {
+            sqlx::query_scalar::<_, i64>(
+                r#"
+                WITH trash_folder AS (
+                    UPDATE storage.folders
+                       SET is_trashed = TRUE,
+                           trashed_at = NOW(),
+                           original_parent_id = parent_id,
+                           updated_at = NOW()
+                     WHERE id = $1::uuid AND NOT is_trashed
+                    RETURNING 1
+                )
+                SELECT COUNT(*) FROM trash_folder
+                "#,
             )
-            SELECT COUNT(*) FROM trash_folder
-            "#,
-        )
-        .bind(folder_id)
-        .fetch_one(self.pool())
+            .bind(folder_id)
+            .fetch_one(self.pool())
+        })
         .await
         .map_err(|e| DomainError::internal_error("FolderDb", format!("trash: {e}")))?;
 
@@ -607,23 +624,25 @@ impl FolderRepository for FolderDbRepository {
         // The BEFORE UPDATE trigger recomputes path/lpath when
         // original_parent_id is restored; the cascade trigger
         // batch-updates all descendants via the GiST lpath index.
-        let result = sqlx::query_scalar::<_, i64>(
-            r#"
-            WITH restore_folder AS (
-                UPDATE storage.folders
-                   SET is_trashed = FALSE,
-                       trashed_at = NULL,
-                       parent_id = COALESCE(original_parent_id, parent_id),
-                       original_parent_id = NULL,
-                       updated_at = NOW()
-                 WHERE id = $1::uuid AND is_trashed
-                RETURNING 1
+        let result = retry_on_deadlock("folders.restore", || {
+            sqlx::query_scalar::<_, i64>(
+                r#"
+                WITH restore_folder AS (
+                    UPDATE storage.folders
+                       SET is_trashed = FALSE,
+                           trashed_at = NULL,
+                           parent_id = COALESCE(original_parent_id, parent_id),
+                           original_parent_id = NULL,
+                           updated_at = NOW()
+                     WHERE id = $1::uuid AND is_trashed
+                    RETURNING 1
+                )
+                SELECT COUNT(*) FROM restore_folder
+                "#,
             )
-            SELECT COUNT(*) FROM restore_folder
-            "#,
-        )
-        .bind(folder_id)
-        .fetch_one(self.pool())
+            .bind(folder_id)
+            .fetch_one(self.pool())
+        })
         .await
         .map_err(|e| DomainError::internal_error("FolderDb", format!("restore: {e}")))?;
 
@@ -636,25 +655,30 @@ impl FolderRepository for FolderDbRepository {
 
     async fn delete_folder_permanently(&self, folder_id: &str) -> Result<(), DomainError> {
         // Delete all files whose folder is anywhere in the subtree
-        // (GiST ltree index, same pattern as delete_folder).
-        sqlx::query(
-            "DELETE FROM storage.files \
-              WHERE folder_id IN ( \
-                  SELECT id FROM storage.folders \
-                   WHERE lpath <@ (SELECT lpath FROM storage.folders WHERE id = $1::uuid) \
-              )",
-        )
-        .bind(folder_id)
-        .execute(self.pool())
+        // (GiST ltree index, same pattern as delete_folder — both
+        // statements retried on deadlock vs the tree-ETag flusher).
+        retry_on_deadlock("folders.perm_delete_files", || {
+            sqlx::query(
+                "DELETE FROM storage.files \
+                  WHERE folder_id IN ( \
+                      SELECT id FROM storage.folders \
+                       WHERE lpath <@ (SELECT lpath FROM storage.folders WHERE id = $1::uuid) \
+                  )",
+            )
+            .bind(folder_id)
+            .execute(self.pool())
+        })
         .await
         .map_err(|e| DomainError::internal_error("FolderDb", format!("perm delete files: {e}")))?;
 
         // Then permanently delete folder — CASCADE handles descendant folders
-        let result = sqlx::query("DELETE FROM storage.folders WHERE id = $1::uuid")
-            .bind(folder_id)
-            .execute(self.pool())
-            .await
-            .map_err(|e| DomainError::internal_error("FolderDb", format!("perm delete: {e}")))?;
+        let result = retry_on_deadlock("folders.perm_delete", || {
+            sqlx::query("DELETE FROM storage.folders WHERE id = $1::uuid")
+                .bind(folder_id)
+                .execute(self.pool())
+        })
+        .await
+        .map_err(|e| DomainError::internal_error("FolderDb", format!("perm delete: {e}")))?;
 
         if result.rows_affected() == 0 {
             return Err(DomainError::not_found("Folder", folder_id));

@@ -16,7 +16,7 @@ mod session_pg_repository;
 mod settings_pg_repository;
 mod share_pg_repository;
 mod subject_group_pg_repository;
-mod transaction_utils;
+pub(crate) mod transaction_utils;
 mod user_pg_repository;
 
 // ── Blob-storage repositories ──

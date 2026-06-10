@@ -227,11 +227,15 @@ impl Folder {
         self.owner_id
     }
 
-    /// Latest descendant-write timestamp, maintained by a Postgres
-    /// trigger that walks the ltree ancestor chain on every file or
-    /// folder write inside this folder's subtree. See migration
-    /// `20260625000000_folder_tree_modified_at.sql` for the trigger
-    /// definition.
+    /// Latest descendant-write timestamp. Statement-level Postgres
+    /// triggers enqueue every file/folder write into
+    /// `storage.tree_etag_dirty`; the background `TreeEtagFlushService`
+    /// drains the queue (default every 500 ms) and bumps the ltree
+    /// ancestor chain in one batched UPDATE. Eventually consistent:
+    /// the bump lands within ~one flush interval AFTER the change is
+    /// committed, never before. See migration
+    /// `20260627000000_async_tree_etag_queue.sql` for the rationale
+    /// (user-facing writes must take zero folder-row locks).
     pub fn tree_modified_at(&self) -> u64 {
         self.tree_modified_at
     }
@@ -257,19 +261,26 @@ impl Folder {
     /// - The 16-char UUID prefix gives the folder its identity
     ///   component — keeps two empty same-mtime folders distinct.
     /// - `tree_modified_at` (Unix seconds) is the actual signal:
-    ///   bumped by trigger whenever ANY descendant (file or
-    ///   sub-folder, at any depth) is created, modified, deleted,
-    ///   or moved. This is the contract NextCloud's sync engine
-    ///   relies on — "did anything change inside this collection
-    ///   since I last looked?". Until this column existed, the
-    ///   answer was always "no" because the folder UUID never
-    ///   changed; clients had to do periodic deep PROPFIND walks
-    ///   to discover web-uploaded files.
+    ///   bumped whenever ANY descendant (file or sub-folder, at any
+    ///   depth) is created, modified, deleted, or moved. This is the
+    ///   contract NextCloud's sync engine relies on — "did anything
+    ///   change inside this collection since I last looked?". Until
+    ///   this column existed, the answer was always "no" because the
+    ///   folder UUID never changed; clients had to do periodic deep
+    ///   PROPFIND walks to discover web-uploaded files.
+    /// - The bump is asynchronous: triggers enqueue, the
+    ///   `TreeEtagFlushService` applies (≤ ~one flush interval after
+    ///   commit, monotonic — two flushes in the same wall-clock
+    ///   second still yield distinct values). Clients only compare
+    ///   etags across successive polls, so the short lag is
+    ///   unobservable; what matters is the bump never precedes the
+    ///   change becoming visible.
     /// - Renaming the folder itself does NOT change the etag's
-    ///   identity portion (UUID is stable across renames). The
-    ///   trigger does bump `tree_modified_at` on rename via the
-    ///   folder-side trigger, so the etag still changes — which is
-    ///   correct, the parent collection's listing changed.
+    ///   identity portion (UUID is stable across renames). A rename
+    ///   does enqueue the ancestor chain, so the PARENT's etag still
+    ///   changes — which is correct, the parent collection's listing
+    ///   changed; the folder's own value stays untouched
+    ///   (self-exclusion).
     pub fn compute_etag(id: &str, tree_modified_at: u64) -> String {
         let prefix: String = id.chars().take(16).collect();
         format!("{}-{}", prefix, tree_modified_at)

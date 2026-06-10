@@ -248,6 +248,12 @@ pub struct StorageConfig {
     /// quota fresh for all mutations without recomputing on the request path.
     /// Default: 600 (10 min). Env: `OXICLOUD_STORAGE_USAGE_RECONCILE_SECS`.
     pub usage_reconcile_secs: u64,
+    /// Interval (milliseconds) of the background job that drains
+    /// `storage.tree_etag_dirty` and bumps folder `tree_modified_at`
+    /// (collection ETags). Write paths only enqueue — this is the upper
+    /// bound on how stale an ancestor folder's ETag can be after a change.
+    /// Default: 500. Env: `OXICLOUD_TREE_ETAG_FLUSH_MS`.
+    pub tree_etag_flush_ms: u64,
     /// Which blob storage backend to use (`local`, `s3`, or `azure`).
     pub backend: StorageBackendType,
     /// S3-compatible backend configuration (used when `backend == S3`).
@@ -390,6 +396,7 @@ impl Default for StorageConfig {
             upload_temp_dir: None,
             chunk_dir: None,
             usage_reconcile_secs: 600, // 10 minutes
+            tree_etag_flush_ms: 500,
             backend: StorageBackendType::Local,
             s3: None,
             azure: None,
@@ -1289,6 +1296,13 @@ impl AppConfig {
             && let Ok(val) = secs
         {
             config.storage.usage_reconcile_secs = val;
+        }
+
+        // Tree-ETag dirty-queue flush cadence
+        if let Ok(ms) = env::var("OXICLOUD_TREE_ETAG_FLUSH_MS").map(|v| v.parse::<u64>())
+            && let Ok(val) = ms
+        {
+            config.storage.tree_etag_flush_ms = val;
         }
 
         // Storage backend selection

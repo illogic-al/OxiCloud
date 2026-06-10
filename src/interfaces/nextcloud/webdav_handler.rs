@@ -1211,9 +1211,9 @@ pub fn write_folder_response<W: std::io::Write>(
             .unwrap_or_else(Utc::now);
 
     write_text_element(xml, "d:getlastmodified", &modified_at.to_rfc2822())?;
-    // Route through `FolderDto::etag` (= `Folder::etag()`, currently
-    // the folder UUID — see the entity for the documented v1 formula
-    // and the follow-up plan to make it descendant-aware).
+    // Route through `FolderDto::etag` (= `Folder::etag()`: the
+    // descendant-aware `{id[..16]}-{tree_modified_at}` — see the
+    // entity for the formula and the async-bump freshness contract).
     write_text_element(xml, "d:getetag", &format!("\"{}\"", folder.etag))?;
     write_text_element(xml, "d:getcontenttype", "httpd/unix-directory")?;
     write_text_element(xml, "d:getcontentlength", "0")?;
