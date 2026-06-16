@@ -256,7 +256,7 @@ pass "G8: DELETE → 204 + GET 404"
 # descendant assertions below will trip and you can flip them
 # to strict 404.
 # ─────────────────────────────────────────────────────────────
-echo "  G9: DELETE folder (pinned: descendants currently orphan — KNOWN BUG)"
+echo "  G9: DELETE folder cascades soft-delete to descendants"
 nc_curl -o /dev/null -X MKCOL "$NC_FILES_BASE/g9-tree/"       > /dev/null
 nc_curl -o /dev/null -X MKCOL "$NC_FILES_BASE/g9-tree/inner/" > /dev/null
 put_nc_file "g9-tree/file.txt"        "G9 file"
@@ -265,22 +265,49 @@ STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X DELETE "$NC_FILES_BASE/g9-tre
 [[ "$STATUS" == "204" ]] \
     || fail "G9: folder DELETE expected 204, got $STATUS"
 
-# Folder itself: correctly 404.
+# Folder itself: 404.
 [[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/")" == "404" ]] \
-    || fail "G9: folder still present after DELETE — that part should always be 404"
+    || fail "G9: folder still resolvable after DELETE"
 
-# Descendants: pin the current (buggy) "still alive" status.
-# Either current 207 (bug) or future 404 (fix) is acceptable;
-# anything else means something has drifted unexpectedly.
-CHILD_STATUS=$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/file.txt")
-DEEP_STATUS=$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/inner/deep.txt")
-if [[ "$CHILD_STATUS" == "207" && "$DEEP_STATUS" == "207" ]]; then
-    pass "G9: descendants still reachable (file=207, deep=207) — KNOWN BUG pinned: move_to_trash isn't recursive at the row level"
-elif [[ "$CHILD_STATUS" == "404" && "$DEEP_STATUS" == "404" ]]; then
-    fail "G9: descendants now correctly 404 (file=$CHILD_STATUS, deep=$DEEP_STATUS) — bug is fixed, flip this case to strict 404 assertions."
-else
-    fail "G9: mixed/unexpected descendant statuses (file=$CHILD_STATUS, deep=$DEEP_STATUS) — pin needs review"
-fi
+# Descendants must now also be 404 (cascade soft-delete reaches the
+# whole subtree). Previous behaviour left them reachable at their
+# full path while the parent was gone — a data-integrity drift that
+# confused desktop-sync tree walks.
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/file.txt")" == "404" ]] \
+    || fail "G9: direct-child file still resolvable after parent DELETE — cascade not working"
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/inner/")" == "404" ]] \
+    || fail "G9: descendant folder still resolvable after parent DELETE — cascade not working"
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/inner/deep.txt")" == "404" ]] \
+    || fail "G9: descendant file still resolvable after parent DELETE — cascade not working"
+pass "G9: DELETE folder → 204, descendants all 404 (cascade reaches the whole subtree)"
+
+# G9b — restore the trashed root and verify cascade-restore brings
+# every descendant back with the same paths. Cascade-trashed
+# descendants (original_parent_id IS NULL) get un-trashed; rows that
+# were independently trashed before the folder went to trash stay
+# trashed.
+echo "  G9b: restore the trashed g9-tree → cascade-restore reaches descendants"
+BODY=$(nc_curl -X PROPFIND -H "Depth: 1" "$NC_TRASH_BASE/")
+G9_TRASHED_HREF=$(extract_response_href_containing "$BODY" "g9-tree")
+G9_TRASHED_ID=$(basename "$G9_TRASHED_HREF")
+[[ -n "$G9_TRASHED_ID" ]] || fail "G9b: trashed g9-tree not found via PROPFIND"
+STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X MOVE \
+    -H "Destination: $NC_FILES_BASE/g9-tree-restored/" \
+    "$NC_TRASH_BASE/$G9_TRASHED_ID")
+[[ "$STATUS" == "201" || "$STATUS" == "204" ]] \
+    || fail "G9b: restore expected 201/204, got $STATUS"
+# The folder and ALL its descendants are reachable again at their
+# original paths (restore goes to original location, not the
+# Destination header).
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/")" == "207" ]] \
+    || fail "G9b: root folder not back after restore"
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/file.txt")" == "207" ]] \
+    || fail "G9b: direct-child file not restored alongside parent"
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/inner/")" == "207" ]] \
+    || fail "G9b: descendant folder not restored alongside parent"
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/inner/deep.txt")" == "207" ]] \
+    || fail "G9b: descendant file not restored alongside parent"
+pass "G9b: restored g9-tree carries the whole subtree back"
 
 # ═════════════════════════════════════════════════════════════
 # Group K — Trashbin DAV (depends on G8's deletion above)
