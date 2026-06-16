@@ -50,7 +50,7 @@ function gridMetaDate(value) {
     const date = value instanceof Date ? value : new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value);
     if (Number.isNaN(date.getTime())) return '';
     const ageDays = (Date.now() - date.getTime()) / 86_400_000;
-    return ageDays > 30 ? formatDateShort(value) : formatRelativeTime(value);
+    return ageDays > 30 ? formatDateShort(date) : formatRelativeTime(date);
 }
 
 /**
@@ -713,7 +713,7 @@ export class ResourceListComponent {
             </div>
             <div class="grid-meta" title="${escapeHtml(formattedDate)}">
                 <span class="grid-meta__date">${escapeHtml(relDate)}</span>
-                ${isShared && folder.owner_id ? `<span class="grid-meta__owner-slot" data-owner-id="${escapeHtml(folder.owner_id)}"></span>` : ''}
+                ${folder.owner_id ? `<span class="grid-meta__owner-slot" data-owner-id="${escapeHtml(folder.owner_id)}"></span>` : ''}
             </div>
             <div class="owner-cell${this._ownerVisible ? '' : ' hidden'}" data-owner-id="${escapeHtml(folder.owner_id || '')}"></div>
             ${cfg.showPath ? `<div class="path-cell" title="${escapeHtml(folder.path || '')}">${escapeHtml(folder.path || '')}</div>` : ''}
@@ -728,7 +728,7 @@ export class ResourceListComponent {
         `;
 
         el.querySelector('.resource-icon-slot')?.replaceWith(buildResourceIcon(folder, 'folder'));
-        if (isShared && folder.owner_id) {
+        if (folder.owner_id) {
             el.querySelector('.grid-meta__owner-slot')?.replaceWith(createUserVignette(folder.owner_id, 'xs', { showName: false }));
         }
         return el;
@@ -741,6 +741,7 @@ export class ResourceListComponent {
      * @returns {HTMLElement}
      */
     _createFileItem(file, labels) {
+        console.log(file);
         const cfg = this._cfg;
         const typeLabel = labels.fileTypeLabel(file.category || '');
         const fileSize = file.size_formatted || formatFileSize(file.size);
@@ -775,7 +776,7 @@ export class ResourceListComponent {
             <div class="grid-meta" title="${escapeHtml(formattedDate)}">
                 <span class="grid-meta__date">${escapeHtml(relDate)}</span>
                 <span class="grid-meta__size">${escapeHtml(fileSize)}</span>
-                ${isShared && file.owner_id ? `<span class="grid-meta__owner-slot" data-owner-id="${escapeHtml(file.owner_id)}"></span>` : ''}
+                ${file.owner_id ? `<span class="grid-meta__owner-slot" data-owner-id="${escapeHtml(file.owner_id)}"></span>` : ''}
             </div>
             <div class="owner-cell${this._ownerVisible ? '' : ' hidden'}" data-owner-id="${escapeHtml(file.owner_id || '')}"></div>
             ${cfg.showPath ? `<div class="path-cell" title="${escapeHtml(file.path || '')}">${escapeHtml(file.path || '')}</div>` : ''}
@@ -790,7 +791,7 @@ export class ResourceListComponent {
         `;
 
         el.querySelector('.resource-icon-slot')?.replaceWith(buildResourceIcon(file, 'file'));
-        if (isShared && file.owner_id) {
+        if (file.owner_id) {
             el.querySelector('.grid-meta__owner-slot')?.replaceWith(createUserVignette(file.owner_id, 'xs', { showName: false }));
         }
         return el;

@@ -1011,8 +1011,14 @@ const ui = {
         // Let ui.js delegation handle this container again
         delete filesList.dataset.managedBy;
 
-        // A clickable, flat-sorting column header (Drive-style). The arrow is
-        // shown only on the active column; direction toggles on re-click.
+        /**
+         * A clickable, flat-sorting column header (Drive-style). The arrow is
+         * shown only on the active column; direction toggles on re-click.
+         * @param {String} field
+         * @param {String} key
+         * @param {String} label
+         * @returns {String}
+         */
         const sortCol = (field, key, label) =>
             `<button type="button" class="list-header-sort" data-sort-field="${field}">` +
             `<span data-i18n="${key}">${label}</span>` +

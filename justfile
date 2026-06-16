@@ -57,17 +57,6 @@ check:
     cargo fmt --all
     cargo clippy --all-features --all-targets -- -D warnings
 
-# Frontend design-system / a11y guardrails — pure Node, no extra deps.
-# Single gate: WCAG contrast, heading order, locale completeness, dead tokens,
-# brand-mark drift.
-# (Also run `stylelint static/css/**/*.css`, `biome check`, `tsc -p jsconfig.json
-#  --noEmit` once node_modules is installed — those need devDependencies.)
-frontend-check:
-    node scripts/check-contrast.mjs
-    node scripts/check-headings.mjs
-    node scripts/check-locales.mjs
-    node scripts/check-dead-tokens.mjs
-    node scripts/check-brand-drift.mjs
 
 wasm-check:
     cd wasm/oxicloud-hash; cargo fmt --all
@@ -94,7 +83,10 @@ front-dev:
     PROFILE=dev cargo run
 
 # front: check all (linter, format, type, icons, translations...)
-front-check: front-fmt front-lint front-type front-rules front-check-icons front-check-i18n
+front-check: front-fmt front-lint front-type front-rules front-check-icons front-check-i18n frontend-check
+
+# kept for compatibility
+frontend-check: front-design
 
 front-fmt:
     biome format static/
@@ -116,7 +108,6 @@ front-check-icons:
 front-check-i18n:
     tools/check-missing-translations.py --check-only
 
-
 # end-to-end Playwright tests
 front-test:
     cd tests/e2e && npm test
@@ -124,6 +115,19 @@ front-test:
 # update images snapshots
 front-test-update-snapshot:
     cd tests/e2e && npm test -- --update-snapshots=all
+
+# Frontend design-system / a11y guardrails — pure Node, no extra deps.
+# Single gate: WCAG contrast, heading order, locale completeness, dead tokens,
+# brand-mark drift.
+# (Also run `stylelint static/css/**/*.css`, `biome check`, `tsc -p jsconfig.json
+#  --noEmit` once node_modules is installed — those need devDependencies.)
+front-design:
+    node scripts/check-contrast.mjs
+    node scripts/check-headings.mjs
+    node scripts/check-locales.mjs
+    node scripts/check-dead-tokens.mjs
+    node scripts/check-brand-drift.mjs
+
 
 # Hurl API functional tests (starts postgres + server, tears down after)
 api-test:

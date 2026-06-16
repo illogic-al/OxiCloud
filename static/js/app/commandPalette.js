@@ -19,11 +19,19 @@ const state = {
 };
 
 /** Click an element by selector (no-op if absent). */
+/**
+ *
+ * @param {String} selector
+ */
 function click(selector) {
     /** @type {HTMLElement | null} */ (document.querySelector(selector))?.click();
 }
 
 /** Activate the sidebar nav button whose label key matches `nav.<section>`. */
+/**
+ *
+ * @param {String} section
+ */
 function navTo(section) {
     document.querySelectorAll('.nav-item').forEach((it) => {
         const key = it.querySelector('span[data-i18n]')?.getAttribute('data-i18n');
@@ -76,6 +84,10 @@ function render() {
         .join('');
 }
 
+/**
+ *
+ * @param {String} query
+ */
 function filter(query) {
     const q = query.trim().toLowerCase();
     state.filtered = q ? state.items.filter((c) => c.label.toLowerCase().includes(q)) : state.items.slice();
@@ -83,6 +95,11 @@ function filter(query) {
     render();
 }
 
+/**
+ *
+ * @param {number} delta
+ * @returns
+ */
 function move(delta) {
     if (!state.filtered.length) return;
     state.index = (state.index + delta + state.filtered.length) % state.filtered.length;
