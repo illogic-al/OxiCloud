@@ -45,7 +45,7 @@ function formatQuotaSize(bytes) {
 
 /**
  *
- * @param {Date | number| null} value
+ * @param {Date | string | number| null} value
  * @returns {string}
  */
 function formatDateTime(value) {

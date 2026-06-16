@@ -69,6 +69,13 @@ function _applyPhoto(avatar, photoUrl, name) {
 
 // ── Component ──────────────────────────────────────────────────────────────────
 
+// Tracks the hover-tooltip cleanup for each vignette so a caller that
+// re-renders the vignette (e.g. replaceChildren on a storage update) can
+// dispose the previous tooltip — otherwise its body-portalled popover orphans
+// and, if it was visible at re-render time, stays stuck on screen.
+/** @type {WeakMap<HTMLElement, () => void>} */
+const _tooltipCleanups = new WeakMap();
+
 /**
  * Available sizes.  Each maps to a `.user-vignette--{size}` CSS modifier:
  *   xs   → 20 px   (chip avatar, small inline contexts)
@@ -112,13 +119,6 @@ function _applyPhoto(avatar, photoUrl, name) {
  * @param {VignetteOptions} [options]
  * @returns {HTMLElement}
  */
-// Tracks the hover-tooltip cleanup for each vignette so a caller that
-// re-renders the vignette (e.g. replaceChildren on a storage update) can
-// dispose the previous tooltip — otherwise its body-portalled popover orphans
-// and, if it was visible at re-render time, stays stuck on screen.
-/** @type {WeakMap<HTMLElement, () => void>} */
-const _tooltipCleanups = new WeakMap();
-
 export function createUserVignette(userId, size = 'sm', { showName = true, showEmail = false, showOrigin = true, noTooltip = false } = {}) {
     const colorIdx = _colorIndex(userId);
 
