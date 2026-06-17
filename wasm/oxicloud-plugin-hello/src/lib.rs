@@ -1,12 +1,17 @@
 //! Example OxiCloud plugin — ABI v0 (M0 walking skeleton).
 //!
-//! The default build is the well-behaved "hello" plugin: it reads the
-//! `file.uploaded` event metadata, calls the host `log` function (the only
+//! The default build is the well-behaved "hello" plugin. It exports one handler
+//! per event it subscribes to — `on_file_uploaded` and `on_user_login` — each of
+//! which reads the event metadata, calls the host `log` function (the only
 //! authority a plugin has), and returns `{"ok": true}`.
 //!
-//! Cargo features select the misbehaving variants the host's failure-isolation
-//! tests load (`panic`, `sleep`, `net`, `wrong_abi`). See
-//! `scripts/build-plugin-hello.sh`.
+//! Cargo features select the variants the host's tests load:
+//! - `panic` / `sleep` / `net` — make `on_file_uploaded` misbehave (failure
+//!   isolation, timeout, network-denial tests);
+//! - `wrong_abi` — `abi_version` returns 1 (load-rejection test);
+//! - `omit_login` — drops the `on_user_login` export (missing-export test).
+//!
+//! See `scripts/build-plugin-hello.sh`.
 
 use extism_pdk::*;
 
@@ -31,9 +36,9 @@ pub fn abi_version() -> FnResult<u32> {
     Ok(1)
 }
 
-/// Required export: the single event entry point.
+/// Handler for the `file.uploaded` event.
 #[plugin_fn]
-pub fn handle(input: String) -> FnResult<String> {
+pub fn on_file_uploaded(input: String) -> FnResult<String> {
     // --- misbehaving variants (compiled in only under their feature) ---------
     #[cfg(feature = "panic")]
     panic!("intentional panic: exercises host failure isolation");
@@ -52,24 +57,39 @@ pub fn handle(input: String) -> FnResult<String> {
     {
         // Attempt an outbound HTTP call. The host grants no `allowed_hosts`, so
         // Extism denies this before any socket is opened (offline-deterministic)
-        // and the error propagates out of `handle`.
+        // and the error propagates out of the handler.
         let req = HttpRequest::new("https://example.com/");
         let _ = http::request::<()>(&req, None)?;
     }
 
-    // --- well-behaved "hello" path ------------------------------------------
+    // --- well-behaved path ---------------------------------------------------
     let ev: serde_json::Value = serde_json::from_str(&input)?;
     let path = ev["payload"]["path"].as_str().unwrap_or("<unknown>");
     let size = ev["payload"]["size"].as_u64().unwrap_or(0);
 
-    // Prove plugin -> host: call the only authority we have.
     unsafe {
         log(
             "info".to_string(),
             format!("hello plugin saw upload: {path} ({size} bytes)"),
         )?;
     }
+    Ok(serde_json::json!({ "ok": true }).to_string())
+}
 
-    // Prove plugin -> host return path.
+/// Handler for the `user.login` event. Dropped by the `omit_login` variant so
+/// the host's missing-export validation has something to reject.
+#[cfg(not(feature = "omit_login"))]
+#[plugin_fn]
+pub fn on_user_login(input: String) -> FnResult<String> {
+    let ev: serde_json::Value = serde_json::from_str(&input)?;
+    let user_id = ev["payload"]["user_id"].as_str().unwrap_or("<unknown>");
+    let first_login = ev["payload"]["first_login"].as_bool().unwrap_or(false);
+
+    unsafe {
+        log(
+            "info".to_string(),
+            format!("hello plugin saw login: user {user_id} (first_login={first_login})"),
+        )?;
+    }
     Ok(serde_json::json!({ "ok": true }).to_string())
 }

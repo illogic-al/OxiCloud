@@ -17,6 +17,10 @@ cd "$(dirname "$0")/.."
 
 CRATE=wasm/oxicloud-plugin-hello
 OUT=tests/fixtures/plugins
+# Pin the wasm build to the crate-local target dir. The devenv sets a global
+# CARGO_TARGET_DIR (outside the repo) which would otherwise relocate the
+# artifact away from the path below.
+export CARGO_TARGET_DIR="$PWD/$CRATE/target"
 ARTIFACT="$CRATE/target/wasm32-unknown-unknown/release/oxicloud_plugin_hello.wasm"
 
 # Needs the wasm32-unknown-unknown target's std. In the devenv this comes from
@@ -37,10 +41,11 @@ build() {
 }
 
 build hello
-build panic     --features panic
-build sleep     --features sleep
-build net       --features net
-build wrong_abi --features wrong_abi
+build panic      --features panic
+build sleep      --features sleep
+build net        --features net
+build wrong_abi  --features wrong_abi
+build omit_login --features omit_login
 
 echo "Built fixtures:"
 ls -la "$OUT"/*.wasm | awk '{print "  " $9 " (" $5 " bytes)"}'

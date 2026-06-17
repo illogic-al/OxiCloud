@@ -12,4 +12,6 @@ pub mod runtime;
 pub use manager::ExtismPluginManager;
 
 #[cfg(test)]
+mod manager_test;
+#[cfg(test)]
 mod runtime_test;

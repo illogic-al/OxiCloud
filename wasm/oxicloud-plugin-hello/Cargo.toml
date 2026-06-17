@@ -20,10 +20,11 @@ serde_json = "1"
 default = []
 # Misbehaving variants for the failure-isolation tests. Each builds a separate
 # fixture under tests/fixtures/plugins/ via the build script.
-panic = []       # `handle` panics -> host must contain the trap
-sleep = []       # `handle` busy-loops past the timeout
-net = []         # `handle` attempts an outbound HTTP call (denied: no allowed_hosts)
+panic = []       # `on_file_uploaded` panics -> host must contain the trap
+sleep = []       # `on_file_uploaded` busy-loops past the timeout
+net = []          # `on_file_uploaded` attempts an outbound HTTP call (denied: no allowed_hosts)
 wrong_abi = []   # `abi_version` returns 1 -> host must reject at load
+omit_login = []  # drops the `on_user_login` export -> host rejects a user.login subscription
 
 [profile.release]
 opt-level = "s"

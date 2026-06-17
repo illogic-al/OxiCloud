@@ -53,6 +53,14 @@
     '';
   };
 
+  # Keep cargo's build output OUT of the repo. The devenv shell is entered via
+  # `use flake "path:$PWD"` (.envrc), and a `path:` flake copies the whole working
+  # tree into the Nix store WITHOUT honoring .gitignore — so a multi-GB `target/`
+  # makes every direnv evaluation hang "copying … to the store". Redirecting
+  # CARGO_TARGET_DIR under $HOME (per-user, so it stays portable) keeps the source
+  # tree small. `builtins.getEnv` is fine here: the flake is evaluated --impure.
+  env.CARGO_TARGET_DIR = "${builtins.getEnv "HOME"}/.cache/oxicloud/target";
+
   # Load .env (justfile uses `set dotenv-load`); contributor should `cp example.env .env`.
   dotenv.enable = true;
 

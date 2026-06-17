@@ -442,6 +442,7 @@ impl AppServiceFactory {
     }
 
     /// Initializes the application services
+    #[allow(clippy::too_many_arguments)] // DI composition root — params are services, not a smell
     pub fn create_application_services(
         &self,
         core: &CoreServices,
@@ -450,6 +451,9 @@ impl AppServiceFactory {
         authz: &Arc<PgAclEngine>,
         storage_usage: &Arc<StorageUsageService>,
         content_index: Option<Arc<TantivyContentIndex>>,
+        plugin_dispatch: Option<
+            Arc<dyn crate::application::ports::plugin_ports::PluginDispatchPort>,
+        >,
     ) -> ApplicationServices {
         // Main services
         let folder_service = Arc::new(FolderService::new(
@@ -470,7 +474,8 @@ impl AppServiceFactory {
 
         // Effective lifecycle dispatcher: the core hooks (thumbnails, metadata)
         // plus, when the plugins feature is enabled, the WASM plugin bridge.
-        let file_lifecycle = self.effective_file_lifecycle(core, &file_retrieval_service);
+        let file_lifecycle =
+            self.effective_file_lifecycle(core, &file_retrieval_service, plugin_dispatch);
 
         let file_upload_service = Arc::new(
             FileUploadService::new_with_read(
@@ -559,22 +564,20 @@ impl AppServiceFactory {
 
     /// Builds the file lifecycle dispatcher handed to the upload/management
     /// services. By default this is just the core dispatcher (thumbnails,
-    /// metadata). When the `plugins` feature is built and enabled, it wraps the
-    /// core dispatcher together with the WASM plugin bridge so plugins observe
-    /// `file.uploaded` events without any of the core hooks being aware of them.
+    /// metadata). When a plugin dispatch is present, it wraps the core dispatcher
+    /// together with the WASM plugin bridge so plugins observe `file.uploaded`
+    /// events without any of the core hooks being aware of them.
     fn effective_file_lifecycle(
         &self,
         core: &CoreServices,
         file_retrieval: &Arc<FileRetrievalService>,
+        plugin_dispatch: Option<
+            Arc<dyn crate::application::ports::plugin_ports::PluginDispatchPort>,
+        >,
     ) -> Arc<dyn crate::application::ports::file_lifecycle::FileLifecycleHook> {
-        #[cfg(feature = "plugins")]
-        if self.config.plugins.enabled
-            && let Some(manager) = self.create_plugin_manager()
-        {
+        if let Some(dispatch) = plugin_dispatch {
             use crate::application::adapters::plugin_lifecycle_hook::PluginLifecycleHook;
-            use crate::application::ports::plugin_ports::PluginDispatchPort;
 
-            let dispatch: Arc<dyn PluginDispatchPort> = manager;
             let bridge = Arc::new(PluginLifecycleHook::new(dispatch, file_retrieval.clone()));
             let composite = FileLifecycleService::new()
                 .with_hook(core.file_lifecycle.clone())
@@ -582,37 +585,54 @@ impl AppServiceFactory {
             return Arc::new(composite);
         }
 
-        let _ = file_retrieval;
         core.file_lifecycle.clone()
     }
 
-    /// Discovers and loads WASM plugins when the `plugins` feature is enabled and
-    /// `OXICLOUD_ENABLE_PLUGINS=true`. Plugins live under
-    /// `OXICLOUD_PLUGINS_DIR` (default `{storage_path}/.plugins`); a missing or
-    /// empty directory simply yields no plugins.
-    #[cfg(feature = "plugins")]
-    fn create_plugin_manager(
+    /// The single plugin manager, exposed as the two ports it serves: the
+    /// dispatch port (shared by every event bridge — file, user, …) and the
+    /// management port (stored on `AppState` for the admin API). Both wrap the
+    /// *same* `Arc`, so an install or toggle through the management port takes
+    /// effect on the live dispatch path with no restart.
+    ///
+    /// Returns trait objects so call sites stay feature-agnostic; the
+    /// `#[cfg(feature = "plugins")]` is confined to this body. Both are `None`
+    /// when the feature is off or `OXICLOUD_ENABLE_PLUGINS` is false.
+    #[allow(clippy::type_complexity)]
+    fn create_plugin_ports(
         &self,
-    ) -> Option<Arc<crate::infrastructure::services::plugins::ExtismPluginManager>> {
-        if !self.config.plugins.enabled {
-            return None;
+    ) -> (
+        Option<Arc<dyn crate::application::ports::plugin_ports::PluginDispatchPort>>,
+        Option<Arc<dyn crate::application::ports::plugin_ports::PluginManagementPort>>,
+    ) {
+        #[cfg(feature = "plugins")]
+        {
+            if self.config.plugins.enabled {
+                let dir = self
+                    .config
+                    .plugins
+                    .plugins_dir
+                    .clone()
+                    .unwrap_or_else(|| self.config.storage_path.join(".plugins"));
+                let manager = Arc::new(
+                    crate::infrastructure::services::plugins::ExtismPluginManager::load_from_dir(
+                        self.config.plugins.clone(),
+                        &dir,
+                    ),
+                );
+                tracing::info!(
+                    target: "oxicloud::plugins",
+                    loaded = manager.loaded_count(),
+                    "plugin manager initialized"
+                );
+                let dispatch: Arc<dyn crate::application::ports::plugin_ports::PluginDispatchPort> =
+                    manager.clone();
+                let management: Arc<
+                    dyn crate::application::ports::plugin_ports::PluginManagementPort,
+                > = manager;
+                return (Some(dispatch), Some(management));
+            }
         }
-        let dir = self
-            .config
-            .plugins
-            .plugins_dir
-            .clone()
-            .unwrap_or_else(|| self.config.storage_path.join(".plugins"));
-        let manager = crate::infrastructure::services::plugins::ExtismPluginManager::load_from_dir(
-            self.config.plugins.clone(),
-            &dir,
-        );
-        tracing::info!(
-            target: "oxicloud::plugins",
-            loaded = manager.loaded_count(),
-            "plugin manager initialized"
-        );
-        Some(Arc::new(manager))
+        (None, None)
     }
 
     /// Creates the audio metadata service (extracts ID3 tags from audio files)
@@ -916,6 +936,13 @@ impl AppServiceFactory {
         // worker starts further down with the maintenance pool.
         let content_index = self.create_content_index();
 
+        // Single plugin manager, surfaced as its two ports: the dispatch port
+        // (shared by every event bridge — file uploads here, user logins at the
+        // auth-services wiring below) and the management port (stored on
+        // AppState for the admin API). Created once so plugins load exactly once
+        // regardless of how many events they observe.
+        let (plugin_dispatch, plugin_management) = self.create_plugin_ports();
+
         // 4. Application services (with trash + authz already wired)
         let mut apps = self.create_application_services(
             &core,
@@ -924,6 +951,7 @@ impl AppServiceFactory {
             &authorization,
             &storage_usage,
             content_index.as_ref().map(|(idx, _)| idx.clone()),
+            plugin_dispatch.clone(),
         );
 
         // 5. Share service
@@ -1013,7 +1041,7 @@ impl AppServiceFactory {
                     pool.clone(),
                 ),
             );
-            let user_lifecycle = Arc::new(
+            let mut user_lifecycle_builder =
                 crate::application::services::user_lifecycle_service::UserLifecycleService::new()
                     .with_hook(Arc::new(
                         crate::application::services::user_lifecycle_service::AuditLifecycleHook,
@@ -1036,8 +1064,20 @@ impl AppServiceFactory {
                     .with_hook(Arc::new(
                         crate::application::services::external_identity_service::ExternalIdentityLifecycleHook::new()
                             .with_magic_link_repo(magic_link_repo.clone()),
-                    )),
-            );
+                    ));
+
+            // Plugin user.login bridge — shares the single plugin dispatch with
+            // the file-upload bridge. Registered only when plugins are active;
+            // inert until auth is enabled (the dispatcher is never fired otherwise).
+            if let Some(dispatch) = &plugin_dispatch {
+                user_lifecycle_builder = user_lifecycle_builder.with_hook(Arc::new(
+                    crate::application::adapters::plugin_user_lifecycle_hook::PluginUserLifecycleHook::new(
+                        dispatch.clone(),
+                    ),
+                ));
+            }
+
+            let user_lifecycle = Arc::new(user_lifecycle_builder);
 
             // Auth services. Folder service no longer threaded here —
             // PR 3 moved home-folder provisioning into
@@ -1171,6 +1211,7 @@ impl AppServiceFactory {
             nextcloud: nextcloud_services,
             admin_settings_service: None,
             storage_settings_service: None,
+            plugin_management,
             migration_state: Arc::new(tokio::sync::RwLock::new(MigrationState::default())),
             trash_service,
             share_service,
@@ -1611,6 +1652,11 @@ pub struct AppState {
     pub auth_service: Option<AuthServices>,
     pub nextcloud: Option<NextcloudServices>,
     pub admin_settings_service: Option<Arc<AdminSettingsService>>,
+    /// WASM plugin management (list/install/toggle/remove), backing the admin
+    /// Plugins tab. `None` when the `plugins` feature is compiled out or
+    /// `OXICLOUD_ENABLE_PLUGINS` is false — the admin endpoints return 503 then.
+    pub plugin_management:
+        Option<Arc<dyn crate::application::ports::plugin_ports::PluginManagementPort>>,
     pub storage_settings_service: Option<Arc<StorageSettingsService>>,
     pub migration_state: Arc<tokio::sync::RwLock<MigrationState>>,
     pub trash_service: Option<Arc<TrashService>>,

@@ -58,7 +58,9 @@ pub enum InvokeOutcome {
     LoadError(String),
     /// `abi_version` returned a value the host does not speak.
     AbiMismatch { got: u32 },
-    /// `handle` returned bytes that are not a valid `PluginOutput`.
+    /// A subscribed event has no matching `on_<event>` export in the module.
+    MissingExport(String),
+    /// The event handler returned bytes that are not a valid `PluginOutput`.
     MalformedOutput(String),
     /// The serialized input exceeded the configured cap; nothing was invoked.
     MalformedInput { size: usize, max: usize },
@@ -78,6 +80,7 @@ impl InvokeOutcome {
             InvokeOutcome::Timeout => "timeout",
             InvokeOutcome::LoadError(_) => "load_error",
             InvokeOutcome::AbiMismatch { .. } => "abi_mismatch",
+            InvokeOutcome::MissingExport(_) => "missing_export",
             InvokeOutcome::MalformedOutput(_) => "malformed_output",
             InvokeOutcome::MalformedInput { .. } => "malformed_input",
         }
@@ -126,25 +129,35 @@ impl PluginRuntime {
             .build()
     }
 
-    /// Probe `abi_version` on a throwaway instance. Used at load time so a lying
-    /// or unloadable plugin is rejected before it is ever registered.
-    pub fn check_loadable(&self, cfg: &PluginConfig) -> InvokeOutcome {
+    /// Probe a throwaway instance at load time: check `abi_version`, then verify
+    /// every `required_export` (the `on_<event>` symbol for each subscribed
+    /// event) actually exists in the module. Rejects lying, unloadable, or
+    /// incompletely-implemented plugins before they are ever registered.
+    pub fn check_loadable(&self, cfg: &PluginConfig, required_exports: &[String]) -> InvokeOutcome {
         let logs = UserData::new(LogContext::default());
         let mut plugin = match self.build(cfg, logs) {
             Ok(p) => p,
             Err(e) => return InvokeOutcome::LoadError(e.to_string()),
         };
         match plugin.call::<(), u32>("abi_version", ()) {
-            Ok(v) if v == OXICLOUD_PLUGIN_ABI => InvokeOutcome::Ok,
-            Ok(v) => InvokeOutcome::AbiMismatch { got: v },
-            Err(e) => classify_call_error(e),
+            Ok(v) if v == OXICLOUD_PLUGIN_ABI => {}
+            Ok(v) => return InvokeOutcome::AbiMismatch { got: v },
+            Err(e) => return classify_call_error(e),
         }
+        for export in required_exports {
+            if !plugin.function_exists(export) {
+                return InvokeOutcome::MissingExport(export.clone());
+            }
+        }
+        InvokeOutcome::Ok
     }
 
-    /// Run one `handle` invocation, fully fault-isolated.
+    /// Run one event-handler invocation, fully fault-isolated. `export` is the
+    /// `on_<event>` symbol to call (see `event_export_name`).
     pub fn invoke(
         &self,
         cfg: &PluginConfig,
+        export: &str,
         invocation_id: &str,
         input_json: &str,
     ) -> InvokeResult {
@@ -192,7 +205,7 @@ impl PluginRuntime {
         }
 
         // The actual call. Traps, timeouts, and OOM all surface here as Err.
-        let outcome = match plugin.call::<&str, String>("handle", input_json) {
+        let outcome = match plugin.call::<&str, String>(export, input_json) {
             Ok(out) => match serde_json::from_str::<PluginOutput>(&out) {
                 Ok(parsed) if parsed.ok => InvokeOutcome::Ok,
                 Ok(parsed) => {

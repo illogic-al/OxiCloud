@@ -152,6 +152,7 @@ function switchTab(name, el) {
     if (name === 'dashboard') loadDashboard();
     if (name === 'storage') loadStorage();
     if (name === 'smtp') loadSmtp();
+    if (name === 'plugins') loadPlugins();
 }
 
 async function loadDashboard() {
@@ -1280,6 +1281,195 @@ async function sendSmtpTest() {
     }
 }
 
+/* ── Plugins ── */
+
+/**
+ * @typedef {Object} PluginInfo
+ * @property {string} id
+ * @property {string} name
+ * @property {string} version
+ * @property {number} abi
+ * @property {string[]} subscriptions
+ * @property {boolean} enabled
+ */
+
+/**
+ * Load installed plugins into the table. A 503 means plugins are disabled on
+ * the server — show the explanatory banner instead of the management UI.
+ */
+async function loadPlugins() {
+    const tbody = document.getElementById('plugins-tbody');
+    const disabledEl = document.getElementById('plugins-disabled');
+    const mainEl = document.getElementById('plugins-main');
+    if (!tbody || !disabledEl || !mainEl) return;
+    try {
+        const resp = await fetch(`${API}/admin/plugins`, {
+            headers: headers(),
+            credentials: 'same-origin'
+        });
+        if (resp.status === 503) {
+            disabledEl.classList.remove('hidden');
+            mainEl.classList.add('hidden');
+            return;
+        }
+        disabledEl.classList.add('hidden');
+        mainEl.classList.remove('hidden');
+        if (!resp.ok) {
+            tbody.innerHTML = `<tr><td colspan="6" class="table-status-error"><i class="fas fa-exclamation-circle"></i> ${escapeHtml(`HTTP ${resp.status}`)}</td></tr>`;
+            return;
+        }
+        /** @type {{enabled: boolean, plugins: PluginInfo[]}} */
+        const data = await resp.json();
+        renderPluginRows(data.plugins || []);
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" class="table-status-error"><i class="fas fa-exclamation-circle"></i> ${escapeHtml(i18n.t('admin.error_network', { message: /** @type {Error} */ (e).message }))}</td></tr>`;
+    }
+}
+
+/** @param {PluginInfo[]} plugins */
+function renderPluginRows(plugins) {
+    const tbody = document.getElementById('plugins-tbody');
+    if (!tbody) return;
+    if (plugins.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" class="table-status-empty">${escapeHtml(i18n.t('admin.plugins_none') || 'No plugins installed.')}</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = plugins
+        .map((p) => {
+            const events = (p.subscriptions || []).map((ev) => `<code>${escapeHtml(ev)}</code>`).join(' ') || '—';
+            const statusLabel = p.enabled ? i18n.t('admin.plugins_enabled') || 'Enabled' : i18n.t('admin.plugins_disabled_badge') || 'Disabled';
+            const statusBadge = `<span class="badge badge-${p.enabled ? 'active' : 'inactive'}">${escapeHtml(statusLabel)}</span>`;
+            const toggleTitle = p.enabled ? i18n.t('admin.plugins_disable') || 'Disable' : i18n.t('admin.plugins_enable') || 'Enable';
+            const toggleBtn =
+                `<button class="btn btn-sm ${p.enabled ? 'btn-secondary' : 'btn-success'} plugin-action-btn" data-action="toggle" data-pid="${_escJs(p.id)}" data-enabled="${p.enabled}" title="${escapeHtml(toggleTitle)}">` +
+                `<i class="fas fa-${p.enabled ? 'pause' : 'play'}"></i></button>`;
+            const deleteBtn =
+                `<button class="btn btn-sm btn-danger plugin-action-btn" data-action="delete" data-pid="${_escJs(p.id)}" data-pname="${_escJs(p.name)}" title="${escapeHtml(i18n.t('admin.plugins_delete') || 'Delete')}">` +
+                '<i class="fas fa-trash-alt"></i></button>';
+            return (
+                '<tr>' +
+                `<td>${escapeHtml(p.name)}</td>` +
+                `<td><code>${escapeHtml(p.id)}</code></td>` +
+                `<td>${escapeHtml(p.version)}</td>` +
+                `<td>${events}</td>` +
+                `<td>${statusBadge}</td>` +
+                `<td><div class="actions-row">${toggleBtn}${deleteBtn}</div></td>` +
+                '</tr>'
+            );
+        })
+        .join('');
+
+    /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('#plugins-tbody .plugin-action-btn')).forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const action = btn.dataset.action;
+            if (action === 'toggle') togglePlugin(btn.dataset.pid, btn.dataset.enabled !== 'true');
+            else if (action === 'delete') deletePlugin(btn.dataset.pid, btn.dataset.pname);
+        });
+    });
+}
+
+/**
+ * @param {string|undefined} id
+ * @param {boolean} enable
+ */
+async function togglePlugin(id, enable) {
+    if (!id) return;
+    try {
+        const resp = await fetch(`${API}/admin/plugins/${encodeURIComponent(id)}/enabled`, {
+            method: 'PUT',
+            headers: headers(),
+            credentials: 'same-origin',
+            body: JSON.stringify({ enabled: enable })
+        });
+        if (resp.ok) {
+            loadPlugins();
+        } else {
+            const e = await resp.json().catch(() => ({}));
+            alert(e.message || i18n.t('admin.error_generic'));
+        }
+    } catch (e) {
+        alert(i18n.t('admin.error_network', { message: /** @type {Error} */ (e).message }));
+    }
+}
+
+/**
+ * @param {string|undefined} id
+ * @param {string|undefined} name
+ */
+async function deletePlugin(id, name) {
+    if (!id) return;
+    const ok = await showConfirm(i18n.t('admin.plugins_confirm_delete', { name: name || id }));
+    if (!ok) return;
+    try {
+        const resp = await fetch(`${API}/admin/plugins/${encodeURIComponent(id)}`, {
+            method: 'DELETE',
+            headers: headers(),
+            credentials: 'same-origin'
+        });
+        if (resp.ok) {
+            loadPlugins();
+        } else {
+            const e = await resp.json().catch(() => ({}));
+            alert(e.message || i18n.t('admin.error_generic'));
+        }
+    } catch (e) {
+        alert(i18n.t('admin.error_network', { message: /** @type {Error} */ (e).message }));
+    }
+}
+
+/**
+ * Install a plugin from the selected .zip bundle. The multipart Content-Type
+ * (with its boundary) is set by the browser — do not override it.
+ */
+async function installPlugin() {
+    const bundleInput = /** @type {HTMLInputElement | null} */ (document.getElementById('plugin-bundle-file'));
+    const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('btn-plugin-install'));
+    const resultEl = document.getElementById('plugin-install-result');
+    if (!bundleInput || !resultEl) return;
+
+    const bundleFile = bundleInput.files?.[0];
+    if (!bundleFile) {
+        resultEl.className = 'alert alert-error';
+        resultEl.style.display = 'block';
+        resultEl.textContent = i18n.t('admin.plugins_install_missing_bundle') || 'Select a plugin bundle (.zip).';
+        return;
+    }
+
+    const form = new FormData();
+    form.append('bundle', bundleFile);
+
+    if (btn) btn.disabled = true;
+    resultEl.className = 'alert alert-info';
+    resultEl.style.display = 'block';
+    resultEl.textContent = i18n.t('admin.plugins_installing') || 'Installing…';
+
+    try {
+        const resp = await fetch(`${API}/admin/plugins`, {
+            method: 'POST',
+            headers: { ...getCsrfHeaders() },
+            credentials: 'same-origin',
+            body: form
+        });
+        if (!resp.ok) {
+            const e = await resp.json().catch(() => ({}));
+            resultEl.className = 'alert alert-error';
+            resultEl.textContent = e.message || `HTTP ${resp.status}`;
+            return;
+        }
+        /** @type {PluginInfo} */
+        const info = await resp.json();
+        resultEl.className = 'alert alert-success';
+        resultEl.textContent = i18n.t('admin.plugins_installed', { name: info.name }) || `Installed ${info.name}.`;
+        bundleInput.value = '';
+        loadPlugins();
+    } catch (e) {
+        resultEl.className = 'alert alert-error';
+        resultEl.textContent = i18n.t('admin.error_network', { message: /** @type {Error} */ (e).message });
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 /* ── Apply i18n when translations load / change ── */
 document.addEventListener('translationsLoaded', () => {
     i18n.translatePage();
@@ -1312,7 +1502,13 @@ document.getElementById('tab-btn-smtp').addEventListener('click', function () {
     switchTab('smtp', this);
 });
 
+document.getElementById('tab-btn-plugins').addEventListener('click', function () {
+    switchTab('plugins', this);
+});
+
 document.getElementById('btn-smtp-test').addEventListener('click', sendSmtpTest);
+
+document.getElementById('btn-plugin-install').addEventListener('click', installPlugin);
 
 document.getElementById('ds-registration').addEventListener('change', function () {
     toggleRegistration(/** @type {HTMLInputElement} */ (this).checked);

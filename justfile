@@ -75,6 +75,11 @@ test-plugins:
 plugin-build:
     bash scripts/build-plugin-hello.sh
 
+# Build the example plugin and bundle plugin.toml + .wasm into an installable
+# .zip at dist/oxicloud-plugin-hello.zip (upload via the admin Plugins tab).
+plugin-example-zip:
+    bash scripts/build-plugin-zip.sh
+
 # fmt + clippy the example plugin crate (standalone workspace, wasm32 target).
 plugin-check:
     cd wasm/oxicloud-plugin-hello; cargo fmt --all

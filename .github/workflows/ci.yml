@@ -56,6 +56,7 @@ jobs:
               - 'src/infrastructure/services/plugins/**'
               - 'src/application/ports/plugin_ports.rs'
               - 'src/application/adapters/plugin_lifecycle_hook.rs'
+              - 'src/application/adapters/plugin_user_lifecycle_hook.rs'
 
   frontend-check:
     name: Frontend — CSS and JS checks (format, lint, css-rules, types)

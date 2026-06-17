@@ -65,6 +65,9 @@
                     <button class="admin-tab" id="tab-btn-smtp">
                         <i class="fas fa-envelope"></i> <span data-i18n="admin.tab_smtp">SMTP</span>
                     </button>
+                    <button class="admin-tab" id="tab-btn-plugins">
+                        <i class="fas fa-puzzle-piece"></i> <span data-i18n="admin.tab_plugins">Plugins</span>
+                    </button>
                 </div>
 
                 <div id="tab-dashboard" class="tab-content active">
@@ -675,6 +678,64 @@
                         </button>
 
                         <div id="smtp-test-result" class="alert" style="display:none; margin-top:14px;"></div>
+                    </div>
+                </div>
+
+                <div id="tab-plugins" class="tab-content">
+                    <div id="plugins-disabled" class="admin-card hidden">
+                        <h2>
+                            <i class="fas fa-puzzle-piece"></i> <span data-i18n="admin.plugins_title">Plugins</span>
+                        </h2>
+                        <p class="muted" data-i18n="admin.plugins_disabled">
+                            Plugins are disabled on this server. Set OXICLOUD_ENABLE_PLUGINS=true (and build with the "plugins" feature) to manage WASM plugins here.
+                        </p>
+                    </div>
+
+                    <div id="plugins-main" class="hidden">
+                        <div class="admin-card">
+                            <h2>
+                                <i class="fas fa-upload"></i> <span data-i18n="admin.plugins_install_title">Install a plugin</span>
+                            </h2>
+                            <p class="muted" data-i18n="admin.plugins_install_intro">
+                                Upload a plugin bundle (.zip) containing plugin.toml and its compiled WebAssembly module (.wasm). The manifest is validated and the module is probed before installation.
+                            </p>
+                            <div class="form-group">
+                                <label for="plugin-bundle-file" data-i18n="admin.plugins_bundle_label">Plugin bundle (.zip)</label>
+                                <input id="plugin-bundle-file" type="file" accept=".zip,application/zip" />
+                            </div>
+                            <button id="btn-plugin-install" class="btn btn-primary">
+                                <i class="fas fa-upload"></i> <span data-i18n="admin.plugins_install">Install plugin</span>
+                            </button>
+                            <div id="plugin-install-result" class="alert" style="display:none; margin-top:14px;"></div>
+                        </div>
+
+                        <div class="admin-card">
+                            <h2>
+                                <i class="fas fa-puzzle-piece"></i> <span data-i18n="admin.plugins_installed_title">Installed plugins</span>
+                            </h2>
+                            <div class="table-wrap">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th data-i18n="admin.plugins_col_name">Name</th>
+                                            <th data-i18n="admin.plugins_col_id">ID</th>
+                                            <th data-i18n="admin.plugins_col_version">Version</th>
+                                            <th data-i18n="admin.plugins_col_events">Events</th>
+                                            <th data-i18n="admin.plugins_col_status">Status</th>
+                                            <th data-i18n="admin.plugins_col_actions">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="plugins-tbody">
+                                        <tr>
+                                            <td colspan="6" class="table-loading-cell">
+                                                <i class="fas fa-spinner fa-spin"></i>
+                                                <span data-i18n="admin.plugins_loading">Loading plugins…</span>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>

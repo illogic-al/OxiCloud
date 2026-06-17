@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::application::ports::plugin_ports::{EVENT_FILE_UPLOADED, OXICLOUD_PLUGIN_ABI};
+use crate::application::ports::plugin_ports::{KNOWN_EVENTS, OXICLOUD_PLUGIN_ABI};
 
 /// Parsed `plugin.toml`. `#[serde(deny_unknown_fields)]` on every struct turns
 /// stray keys into load errors rather than silently ignored config.
@@ -90,7 +90,7 @@ pub fn parse_and_validate(toml_str: &str) -> Result<PluginManifest, ManifestErro
         return Err(ManifestError::NoEvents);
     }
     for event in &manifest.events.subscribe {
-        if event != EVENT_FILE_UPLOADED {
+        if !KNOWN_EVENTS.contains(&event.as_str()) {
             return Err(ManifestError::UnknownEvent(event.clone()));
         }
     }

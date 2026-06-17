@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::file_ports::FileRetrievalUseCase;
 use crate::application::ports::plugin_ports::{
-    EVENT_FILE_UPLOADED, FileUploadedEvent, PluginDispatchPort,
+    EVENT_FILE_UPLOADED, PluginDispatchPort, PluginEvent,
 };
 use crate::application::services::FileRetrievalService;
 
@@ -59,12 +59,15 @@ impl PluginLifecycleHook {
                 }
             };
 
-            dispatch.dispatch_file_uploaded(FileUploadedEvent {
-                path: dto.path,
-                size: dto.size,
-                mime: dto.mime_type.to_string(),
+            dispatch.dispatch(PluginEvent {
+                name: EVENT_FILE_UPLOADED,
                 user_id: dto.owner_id,
                 invocation_id: Uuid::new_v4().to_string(),
+                payload: serde_json::json!({
+                    "path": dto.path,
+                    "size": dto.size,
+                    "mime": dto.mime_type.to_string(),
+                }),
             });
         });
     }

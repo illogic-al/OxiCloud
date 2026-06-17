@@ -1,17 +1,19 @@
 use axum::{
     Router,
-    extract::{Json, Path, Query, State},
+    extract::{Json, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post, put},
 };
 
+use crate::application::dtos::plugin_dto::{PluginInfoDto, SetEnabledDto};
 use crate::application::dtos::settings_dto::{
     AdminCreateUserDto, AdminResetPasswordDto, DashboardStatsDto, ListUsersQueryDto,
     MigrationStateDto, SaveOidcSettingsDto, SaveStorageSettingsDto, SendSmtpTestDto, SmtpInfoDto,
     SmtpTestResultDto, StartMigrationDto, TestOidcConnectionDto, TestStorageConnectionDto,
     UpdateUserActiveDto, UpdateUserQuotaDto, UpdateUserRoleDto, VerifyMigrationDto,
 };
+use crate::application::ports::plugin_ports::{PluginManagementPort, PluginMgmtError};
 use crate::common::di::AppState;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::admin::require_admin;
@@ -60,6 +62,11 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         .route("/audio/metadata/reextract", post(reextract_audio_metadata))
         // Image/video capture metadata (Photos timeline backfill)
         .route("/photos/metadata/reextract", post(reextract_image_metadata))
+        // Plugin management
+        .route("/plugins", get(list_plugins))
+        .route("/plugins", post(install_plugin))
+        .route("/plugins/{id}/enabled", put(set_plugin_enabled))
+        .route("/plugins/{id}", delete(delete_plugin))
         // SMTP diagnostics
         .route("/smtp/info", get(get_smtp_info))
         .route("/smtp/test", post(send_smtp_test))
@@ -1439,4 +1446,181 @@ async fn send_smtp_test(
     };
 
     Ok(Json(result))
+}
+
+// ---- Plugin management -----------------------------------------------------
+
+/// Resolve the plugin-management port, or 503 when plugins are compiled out or
+/// disabled via `OXICLOUD_ENABLE_PLUGINS`. The admin UI treats this 503 as the
+/// "plugins disabled" state rather than an error.
+fn plugin_mgmt(state: &AppState) -> Result<&Arc<dyn PluginManagementPort>, AppError> {
+    state.plugin_management.as_ref().ok_or_else(|| {
+        AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Plugins are disabled",
+            "PluginsDisabled",
+        )
+    })
+}
+
+/// Map a management-layer error to an HTTP error. NotFound → 404, IdExists →
+/// 409, Rejected → 400 (with the stable reason key in the message), Io → 500.
+fn map_mgmt_err(err: &PluginMgmtError) -> AppError {
+    match err {
+        PluginMgmtError::NotFound => AppError::not_found("Plugin not found"),
+        PluginMgmtError::IdExists => {
+            AppError::conflict("A plugin with this id is already installed")
+        }
+        PluginMgmtError::Rejected(reason) => AppError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Plugin rejected: {reason}"),
+            "PluginRejected",
+        ),
+        PluginMgmtError::Io(msg) => {
+            AppError::internal_error(format!("Plugin operation failed: {msg}"))
+        }
+    }
+}
+
+/// GET /api/admin/plugins — list installed plugins.
+pub async fn list_plugins(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    admin_guard(&state, &headers).await?;
+    let mgmt = plugin_mgmt(&state)?;
+    let plugins: Vec<PluginInfoDto> = mgmt.list().into_iter().map(PluginInfoDto::from).collect();
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "enabled": true, "plugins": plugins })),
+    ))
+}
+
+/// PUT /api/admin/plugins/{id}/enabled — enable or disable a plugin.
+pub async fn set_plugin_enabled(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(dto): Json<SetEnabledDto>,
+) -> Result<impl IntoResponse, AppError> {
+    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let mgmt = plugin_mgmt(&state)?;
+    mgmt.set_enabled(&id, dto.enabled)
+        .map_err(|e| map_mgmt_err(&e))?;
+
+    if dto.enabled {
+        tracing::info!(
+            target: "audit",
+            event = "plugin.enabled",
+            plugin_id = %id,
+            admin_id = %admin_id,
+            "👮🏻‍♂️ plugin enabled by admin"
+        );
+    } else {
+        tracing::info!(
+            target: "audit",
+            event = "plugin.disabled",
+            plugin_id = %id,
+            admin_id = %admin_id,
+            "👮🏻‍♂️ plugin disabled by admin"
+        );
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": if dto.enabled { "Plugin enabled" } else { "Plugin disabled" },
+            "id": id,
+            "enabled": dto.enabled,
+        })),
+    ))
+}
+
+/// POST /api/admin/plugins — install a plugin from a multipart body with a
+/// single `bundle` part: a `.zip` containing `plugin.toml` and its `.wasm`.
+pub async fn install_plugin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, AppError> {
+    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let mgmt = plugin_mgmt(&state)?;
+
+    let mut bundle: Option<Vec<u8>> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::bad_request(format!("Invalid multipart body: {e}")))?
+    {
+        if field.name() == Some("bundle") {
+            bundle = Some(
+                field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::bad_request(format!("Invalid bundle part: {e}")))?
+                    .to_vec(),
+            );
+        }
+    }
+
+    let bundle = match bundle {
+        Some(b) => b,
+        None => {
+            tracing::warn!(
+                target: "audit",
+                event = "plugin.install_rejected",
+                reason = "missing_part",
+                admin_id = %admin_id,
+                "👮🏻‍♂️ plugin install rejected: missing 'bundle' part"
+            );
+            return Err(AppError::bad_request("A 'bundle' (.zip) part is required"));
+        }
+    };
+
+    match mgmt.install_bundle(bundle) {
+        Ok(info) => {
+            tracing::info!(
+                target: "audit",
+                event = "plugin.installed",
+                plugin_id = %info.id,
+                admin_id = %admin_id,
+                "👮🏻‍♂️ plugin installed by admin"
+            );
+            Ok((StatusCode::CREATED, Json(PluginInfoDto::from(info))))
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "audit",
+                event = "plugin.install_rejected",
+                reason = e.reason(),
+                admin_id = %admin_id,
+                "👮🏻‍♂️ plugin install rejected"
+            );
+            Err(map_mgmt_err(&e))
+        }
+    }
+}
+
+/// DELETE /api/admin/plugins/{id} — uninstall a plugin and delete its files.
+pub async fn delete_plugin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let mgmt = plugin_mgmt(&state)?;
+    mgmt.remove(&id).map_err(|e| map_mgmt_err(&e))?;
+
+    tracing::info!(
+        target: "audit",
+        event = "plugin.removed",
+        plugin_id = %id,
+        admin_id = %admin_id,
+        "👮🏻‍♂️ plugin removed by admin"
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "message": "Plugin removed", "id": id })),
+    ))
 }

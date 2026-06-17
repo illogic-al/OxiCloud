@@ -1,0 +1,11 @@
+# Manifest for the example OxiCloud plugin (ABI v0). `just plugin-example-zip`
+# bundles this together with the compiled module into an installable .zip.
+[plugin]
+id = "com.example.hello"
+name = "Hello"
+version = "0.1.0"
+abi = 0
+entrypoint = "hello.wasm"
+
+[events]
+subscribe = ["file.uploaded", "user.login"]
