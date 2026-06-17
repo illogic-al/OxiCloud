@@ -38,7 +38,7 @@ impl SharePgRepository {
 
     /// Maps a [`sqlx::postgres::PgRow`] to the domain [`Share`] entity.
     /// Expects columns: id, item_id, item_name, item_type, token, password_hash,
-    /// expires_at (derived from access_grants subquery), created_at, created_by, access_count.
+    /// expires_at (derived from role_grants subquery), created_at, created_by, access_count.
     fn row_to_entity(row: &sqlx::postgres::PgRow) -> Result<Share, DomainError> {
         let id: Uuid = row
             .try_get("id")
@@ -54,7 +54,7 @@ impl SharePgRepository {
             DomainError::internal_error("Share", format!("Failed to read token: {e}"))
         })?;
         let password_hash: Option<String> = row.try_get("password_hash").unwrap_or(None);
-        // expires_at derived from access_grants subquery (unix seconds as i64)
+        // expires_at derived from role_grants subquery (unix seconds as i64)
         let expires_at: Option<i64> = row.try_get("expires_at").unwrap_or(None);
         let created_at: i64 = row.try_get("created_at").map_err(|e| {
             DomainError::internal_error("Share", format!("Failed to read created_at: {e}"))
@@ -98,7 +98,7 @@ impl ShareStoragePort for SharePgRepository {
             RETURNING
                 id, item_id, item_name, item_type, token, password_hash,
                 (SELECT MIN(EXTRACT(EPOCH FROM ag.expires_at)::BIGINT)
-                 FROM storage.access_grants ag
+                 FROM storage.role_grants ag
                  WHERE ag.subject_type = 'token' AND ag.subject_id = id) AS expires_at,
                 created_at, created_by, access_count
             "#,
@@ -127,7 +127,7 @@ impl ShareStoragePort for SharePgRepository {
             r#"
             SELECT s.id, s.item_id, s.item_name, s.item_type, s.token, s.password_hash,
                 (SELECT MIN(EXTRACT(EPOCH FROM ag.expires_at)::BIGINT)
-                 FROM storage.access_grants ag
+                 FROM storage.role_grants ag
                  WHERE ag.subject_type = 'token' AND ag.subject_id = s.id) AS expires_at,
                 s.created_at, s.created_by, s.access_count
             FROM storage.shares s
@@ -160,7 +160,7 @@ impl ShareStoragePort for SharePgRepository {
             r#"
             SELECT s.id, s.item_id, s.item_name, s.item_type, s.token, s.password_hash,
                 (SELECT MIN(EXTRACT(EPOCH FROM ag.expires_at)::BIGINT)
-                 FROM storage.access_grants ag
+                 FROM storage.role_grants ag
                  WHERE ag.subject_type = 'token' AND ag.subject_id = s.id) AS expires_at,
                 s.created_at, s.created_by, s.access_count
             FROM storage.shares s
@@ -218,7 +218,7 @@ impl ShareStoragePort for SharePgRepository {
             r#"
             SELECT s.id, s.item_id, s.item_name, s.item_type, s.token, s.password_hash,
                 (SELECT MIN(EXTRACT(EPOCH FROM ag.expires_at)::BIGINT)
-                 FROM storage.access_grants ag
+                 FROM storage.role_grants ag
                  WHERE ag.subject_type = 'token' AND ag.subject_id = s.id) AS expires_at,
                 s.created_at, s.created_by, s.access_count
             FROM storage.shares s
@@ -250,7 +250,7 @@ impl ShareStoragePort for SharePgRepository {
             RETURNING
                 id, item_id, item_name, item_type, token, password_hash,
                 (SELECT MIN(EXTRACT(EPOCH FROM ag.expires_at)::BIGINT)
-                 FROM storage.access_grants ag
+                 FROM storage.role_grants ag
                  WHERE ag.subject_type = 'token' AND ag.subject_id = storage.shares.id) AS expires_at,
                 created_at, created_by, access_count
             "#,
@@ -286,7 +286,7 @@ impl ShareStoragePort for SharePgRepository {
             r#"
             SELECT s.id, s.item_id, s.item_name, s.item_type, s.token, s.password_hash,
                 (SELECT MIN(EXTRACT(EPOCH FROM ag.expires_at)::BIGINT)
-                 FROM storage.access_grants ag
+                 FROM storage.role_grants ag
                  WHERE ag.subject_type = 'token' AND ag.subject_id = s.id) AS expires_at,
                 s.created_at, s.created_by, s.access_count,
                 COUNT(*) OVER() AS total_count

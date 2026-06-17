@@ -5,7 +5,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::domain::repositories::folder_repository::FolderRepository;
-use crate::domain::services::authorization::{Permission, Resource, Subject};
+use crate::domain::services::authorization::{Resource, Role, Subject};
 use crate::infrastructure::repositories::pg::SharePgRepository;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
@@ -254,9 +254,9 @@ impl ShareUseCase for ShareService {
             .await
             .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
 
-        // Create one Read-only grant for the token subject, carrying expires_at.
-        // Tokens are always read-only. The DELETE trigger `trg_cleanup_grants_token`
-        // cleans up this grant when the share is later deleted.
+        // Anonymous link tokens always get the Viewer role (read-only).
+        // The `trg_cleanup_grants_token` trigger cleans up this grant when
+        // the share row is later deleted.
         let item_id_uuid = Uuid::parse_str(saved_share.item_id())
             .map_err(|_| ShareServiceError::Validation("Invalid item UUID".to_string()))?;
         let resource = match saved_share.item_type() {
@@ -267,10 +267,10 @@ impl ShareUseCase for ShareService {
             .expires_at
             .and_then(|ts| chrono::DateTime::from_timestamp(ts as i64, 0));
         self.authorization
-            .grant(
+            .set_role(
                 user_id,
                 Subject::Token(saved_share.id()),
-                Permission::Read,
+                Role::Viewer,
                 resource,
                 expires_dt,
             )

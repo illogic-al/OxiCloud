@@ -303,18 +303,24 @@
  */
 
 /**
+ * Server-side role enum — every grantable role the backend recognises.
+ * The share modal's UI picker only exposes a subset (see `ShareRoleEnum`);
+ * the wire format may carry any of these values on a Grant.
+ * @typedef {'viewer'|'commenter'|'contributor'|'editor'|'owner'} GrantRoleEnum
+ */
+
+/**
  * @typedef {Object} Grant
  * @property {string} id
  * @property {string} granted_at  - ISO-8601 datetime string.
  * @property {string} granted_by
  * @property {Subject} subject
- * @property {PermissionTypeEnum} permission
+ * @property {GrantRoleEnum} role - Role-keyed grant. One Grant = one role
+ *   assignment in `storage.role_grants`. The implied permission bundle
+ *   is derived client-side from the same lookup table used by
+ *   `Role::expand()` on the server (see `ROLE_PERMISSIONS` in shareModal).
  * @property {Resource} resource
  * @property {string|null} [expires_at]  - ISO-8601 datetime string, or absent/null for no expiry.
- */
-
-/**
- * Roles: `viewer`, `commenter`, `editor`, `manager`, `admin`
  */
 
 /**
@@ -367,7 +373,7 @@
  * @property {'user'|'group'|'token'|'external'}   subject_type
  * @property {string}                              subject_id
  * @property {string}                              subject_display - Username (users) or share name (tokens).
- * @property {'viewer'|'commenter'|'contributor'|'editor'|'owner'} role - Server-emitted role string. `commenter` and `contributor` are reserved for future UI exposure; today the share modal only renders `viewer`/`editor`/`owner` (see `ShareRoleEnum`).
+ * @property {GrantRoleEnum} role - Server-emitted role string. `commenter` and `contributor` are reserved for future UI exposure; today the share modal only renders `viewer`/`editor`/`owner` (see `ShareRoleEnum`).
  * @property {string}                              granted_at   - ISO-8601
  * @property {string|null}                         [expires_at] - ISO-8601 or absent.
  * @property {boolean}                             has_password - True when a token subject has a password set.
@@ -464,7 +470,11 @@
  * One collaborator row in the share modal's People section.
  * @typedef {Object} MemberEntry
  * @property {Grant}         grant   - Representative grant (used for subject/resource info).
- * @property {Grant[]}       _grants - All grants for this subject on the resource (may be > 1).
+ * @property {Grant[]}       _grants - All grants for this subject on the resource. Post-pivot
+ *   this is at most one entry (`storage.role_grants` UNIQUE on
+ *   `(subject, resource)`); the array shape is preserved so the existing
+ *   "revoke every grant on remove" loop in `_applyAll` still works
+ *   without a special-case for empty / new entries.
  * @property {ShareRoleEnum} role    - Derived role label shown in the UI.
  * @property {'keep'|'remove'|'change'|'new'} _op - Pending local operation.
  * @property {string|null}  [expires_at]  - YYYY-MM-DD expiry date string, or null for no expiry.

@@ -2,7 +2,7 @@
 //!
 //! Subject groups are root-owned (no `owner_id`), globally named with an
 //! RFC 5321 local-part shape, and able to contain users *or* other groups.
-//! Grants in `storage.access_grants` with `subject_type = 'group'` reference
+//! Grants in `storage.role_grants` with `subject_type = 'group'` reference
 //! a row in `auth.subject_groups`.
 //!
 //! Cycle prevention and depth-cap (`MAX_GROUP_DEPTH`) are enforced at the

@@ -285,7 +285,7 @@ HTTP 201
 # `CreateGrantResponseDto { grants, notification }`.
 [Asserts]
 jsonpath "$.grants" count == 1
-jsonpath "$.grants[0].permission" == "read"
+jsonpath "$.grants[0].role" == "viewer"
 jsonpath "$.grants[0].subject.type" == "group"
 jsonpath "$.grants[0].subject.id"   == "{{group_a_id}}"
 
@@ -355,7 +355,7 @@ Authorization: Bearer {{henry_token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$[?(@.resource.id=='{{perm_folder_id}}')].permission" == "read"
+jsonpath "$[?(@.resource.id=='{{perm_folder_id}}')].role" == "viewer"
 jsonpath "$[?(@.resource.id=='{{perm_folder_id}}')].subject.type" == "group"
 jsonpath "$[?(@.resource.id=='{{perm_folder_id}}')].subject.id"   == "{{group_a_id}}"
 
@@ -533,7 +533,7 @@ HTTP 404
 
 
 # ════════════════════════════════════════════════════════════════════
-# Phase D — Promote group A's grant to Admin (all 6 permissions).
+# Phase D — Promote group A's grant to Owner (full bundle).
 #           Delete now succeeds for henry, still flowing through B → A.
 # ════════════════════════════════════════════════════════════════════
 PUT {{base_url}}/api/grants/role
@@ -542,7 +542,7 @@ Content-Type: application/json
 {
   "subject":  { "type": "group",  "id": "{{group_a_id}}" },
   "resource": { "type": "folder", "id": "{{perm_folder_id}}" },
-  "role": "admin"
+  "role": "owner"
 }
 
 HTTP 200

@@ -4,17 +4,15 @@
 # Pins the D-Prep refactor behaviours that don't fit naturally into
 # the existing `grants.hurl` (which is API-shape-focused). Specifically:
 #
-#   1. New wire-format role names:
+#   1. Wire-format role names:
 #        - "owner" is accepted on POST and emitted on response
-#        - "admin" still accepted on POST for one release (compat shim
-#          in `Role::parse`); the server normalises it to Owner
+#        - "admin" is REJECTED with 422 (compat alias retired in the
+#          cleanup PR — see Step 6a)
 #
-#   2. Dual-write proof: granting a role and then exercising a
+#   2. Role-keyed write proof: granting a role and then exercising a
 #      permission from its bundle works → proves the row landed in
-#      `storage.role_grants` because the engine now reads from there
-#      for authz decisions (see `folder_cascade_grant_exists` post-
-#      D-Prep). If dual-write failed, the engine would see no row and
-#      reject the check.
+#      `storage.role_grants` and the engine read path expands the
+#      bundle correctly (see `folder_cascade_grant_exists`).
 #
 #   3. Atomic role updates via PUT /api/grants/role — the role flips
 #      in a single SQL update (no DELETE+INSERT race window).
@@ -177,10 +175,9 @@ HTTP 204
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 6 — Legacy "admin" string compat. The server's Role::parse
-#          accepts "admin" and normalises to Owner during the D-Prep
-#          dual-write window (one release). Verify by granting sam
-#          with role="admin" — sam should then be able to Delete too.
+# Step 6a — Reject the legacy "admin" string. The cleanup PR
+#          retired the `#[serde(alias = "admin")]` compat shim on
+#          `RoleDto::Owner`; the deserialiser now refuses it with 422.
 # ─────────────────────────────────────────────────────────────
 POST {{base_url}}/api/grants
 Authorization: Bearer {{admin_token}}
@@ -191,15 +188,26 @@ Content-Type: application/json
   "role": "admin"
 }
 
+HTTP 422
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 6b — Grant sam Owner with the canonical role string.
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/grants
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "subject": { "type": "user", "id": "{{sam_user_id}}" },
+  "resource": { "type": "folder", "id": "{{test_folder_id}}" },
+  "role": "owner"
+}
+
 HTTP 201
 [Captures]
-# Capture the first per-permission grant id from the response so
-# Step 10's revoke doesn't have to query the My Shares endpoint
-# with awkward JSONPath filtering. Any single grant_id works:
-# the revoke handler calls `clear_role` which wipes the entire
-# role_grants row for (sam, test_folder), so the engine reads
-# return false for sam afterwards regardless of how many
-# access_grants rows still exist.
+# The single role-keyed Grant returned in `.grants[0]` is the
+# `storage.role_grants` row id. Step 10's revoke uses it to
+# `clear_role` and wipe the row.
 sam_grant_id: jsonpath "$.grants[0].id"
 
 
@@ -326,9 +334,8 @@ body not contains "\"role\":\"admin\""
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 10 — Revoke: removing sam's grant. The handler clears the
-#           access_grants rows AND calls clear_role to wipe the
-#           role_grants row in the same flow.
+# Step 10 — Revoke: removing sam's grant. `engine.revoke()` DELETEs
+#           the single `storage.role_grants` row by id.
 #
 #           After: sam's Delete attempt should be refused (proof
 #           the role_grants row is gone — the cascade query for
@@ -336,7 +343,7 @@ body not contains "\"role\":\"admin\""
 #           at this folder).
 # ─────────────────────────────────────────────────────────────
 
-# sam_grant_id was captured at Step 6 from the create response.
+# sam_grant_id was captured at Step 6b from the create response.
 DELETE {{base_url}}/api/grants/{{sam_grant_id}}
 Authorization: Bearer {{admin_token}}
 

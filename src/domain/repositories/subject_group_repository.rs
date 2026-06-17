@@ -93,8 +93,8 @@ pub trait SubjectGroupRepository: Send + Sync + 'static {
     ) -> Result<SubjectGroup, SubjectGroupRepositoryError>;
 
     /// Delete the group. Cascades to `subject_group_members` and to
-    /// `storage.access_grants` rows referencing this group as subject (via
-    /// the application service — there is no FK between `access_grants` and
+    /// `storage.role_grants` rows referencing this group as subject (via
+    /// the application service — there is no FK between `role_grants` and
     /// `subject_groups`, so the service performs the cascade explicitly in
     /// the same transaction).
     async fn delete(&self, id: Uuid) -> Result<(), SubjectGroupRepositoryError>;

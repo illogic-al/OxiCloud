@@ -1388,7 +1388,7 @@ impl AuthApplicationService {
     /// Visibility rule, evaluated top-to-bottom:
     ///   1. **Self lookup** — `caller_id == target_id` always succeeds.
     ///   2. **Shared-grant relationship** — caller and target appear
-    ///      together on at least one row of `storage.access_grants`,
+    ///      together on at least one row of `storage.role_grants`,
     ///      either direction (caller-as-granter / target-as-subject,
     ///      or target-as-granter / caller-as-subject). Applies to both
     ///      internal and external callers. This is what lets an
@@ -1454,7 +1454,7 @@ impl AuthApplicationService {
         let related: Option<i32> = sqlx::query_scalar(
             r#"
             SELECT 1
-              FROM storage.access_grants
+              FROM storage.role_grants
              WHERE (granted_by = $1 AND subject_type = 'user' AND subject_id = $2)
                 OR (granted_by = $2 AND subject_type = 'user' AND subject_id = $1)
              LIMIT 1

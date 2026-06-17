@@ -221,7 +221,7 @@ Content-Type: application/json
 {
     "subject": { "type": "group", "id": "{{engineers_id}}" },
     "resource": { "type": "folder", "id": "{{shared_folder_id}}" },
-    "permissions": ["read"]
+    "role": "viewer"
 }
 
 HTTP 201

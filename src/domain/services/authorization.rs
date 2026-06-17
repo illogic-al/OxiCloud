@@ -3,7 +3,7 @@
 //! These types are storage-agnostic — they describe the relationship between
 //! a subject (who), a resource (what), and a permission (action). The
 //! `AuthorizationEngine` port consumes them and the `PgAclEngine` implementation
-//! maps them to / from `storage.access_grants` rows.
+//! maps them to / from `storage.role_grants` rows.
 
 use crate::application::dtos::cursor::PageCursor;
 use std::fmt;
@@ -49,7 +49,7 @@ impl Subject {
     /// `"external"` is no longer accepted: PR-2 of the external-users
     /// work folded the federated-identity case into `Subject::User(uuid)`
     /// with `auth.users.is_external = TRUE`. The DB CHECK constraint
-    /// on `storage.access_grants.subject_type` was narrowed to match.
+    /// on `storage.role_grants.subject_type` was narrowed to match.
     pub fn from_parts(subject_type: &str, id: Uuid) -> Option<Self> {
         match subject_type {
             "user" => Some(Subject::User(id)),
@@ -200,7 +200,7 @@ impl fmt::Display for Permission {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Grant — a row in storage.access_grants
+// Grant — a row in storage.role_grants
 // ════════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone, Debug)]
@@ -208,10 +208,130 @@ pub struct Grant {
     pub id: Uuid,
     pub subject: Subject,
     pub resource: Resource,
-    pub permission: Permission,
+    /// Role-keyed since D-Prep cleanup: one `Grant` represents the role
+    /// row in `storage.role_grants` rather than a single permission. The
+    /// engine and HTTP surface no longer carry per-permission rows;
+    /// callers that need permissions use `role.expand()`.
+    pub role: Role,
     pub granted_by: Uuid,
     pub granted_at: chrono::DateTime<chrono::Utc>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Role — a named bundle of permissions
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Roles are the load-bearing model for ReBAC grants since D-Prep. Each
+// `storage.role_grants` row stores one role; the engine expands the bundle
+// at read time via `Role::expand()`. Adding a role is two edits:
+//   1. a variant here + match arm in `expand()` / `as_str()` / `parse()`
+//   2. an `ALTER TYPE storage.grant_role ADD VALUE 'name'` migration
+//
+// `RoleDto` (DTO layer) carries the wire-format derives + the legacy
+// `"admin"` alias for backwards compat.
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Role {
+    Viewer,
+    Commenter,
+    Contributor,
+    Editor,
+    Owner,
+}
+
+impl Role {
+    /// Expand the role into its permission bundle. Single source of truth —
+    /// any code that needs "does this role include Permission X?" routes
+    /// through here (or its inverse, `roles_implying`).
+    pub fn expand(self) -> &'static [Permission] {
+        match self {
+            Role::Viewer => &[Permission::Read],
+            Role::Commenter => &[Permission::Read, Permission::Comment],
+            Role::Contributor => &[Permission::Read, Permission::Create],
+            Role::Editor => &[
+                Permission::Read,
+                Permission::Comment,
+                Permission::Create,
+                Permission::Update,
+            ],
+            Role::Owner => &[
+                Permission::Read,
+                Permission::Comment,
+                Permission::Create,
+                Permission::Update,
+                Permission::Share,
+                Permission::Delete,
+                Permission::Manage,
+            ],
+        }
+    }
+
+    /// Lowercase discriminator — matches the SQL `role` ENUM values in
+    /// `storage.role_grants` (after the `::text` cast).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Viewer => "viewer",
+            Role::Commenter => "commenter",
+            Role::Contributor => "contributor",
+            Role::Editor => "editor",
+            Role::Owner => "owner",
+        }
+    }
+
+    /// Parse a role from its SQL discriminator. Returns `None` for unknown
+    /// values. The `"admin"` legacy alias is handled by `RoleDto` at the
+    /// wire boundary — the database only ever stores the canonical names.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "viewer" => Some(Role::Viewer),
+            "commenter" => Some(Role::Commenter),
+            "contributor" => Some(Role::Contributor),
+            "editor" => Some(Role::Editor),
+            "owner" => Some(Role::Owner),
+            _ => None,
+        }
+    }
+
+    /// Every role, in declaration order. Mirrors the `storage.grant_role`
+    /// ENUM order in PG, which is weakest-to-strongest as written here for
+    /// historical reasons (`storage.grant_role` declares strongest first).
+    pub const ALL: [Role; 5] = [
+        Role::Viewer,
+        Role::Commenter,
+        Role::Contributor,
+        Role::Editor,
+        Role::Owner,
+    ];
+}
+
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Inverse of [`Role::expand`]: returns every role whose bundle contains
+/// the given permission. Used by the engine to build the SQL
+/// `WHERE role IN (...)` filter on hot-path queries like "what drives can
+/// this caller read?".
+pub fn roles_implying(permission: Permission) -> &'static [Role] {
+    use Permission::*;
+    match permission {
+        Read => &[
+            Role::Viewer,
+            Role::Commenter,
+            Role::Contributor,
+            Role::Editor,
+            Role::Owner,
+        ],
+        Comment => &[Role::Commenter, Role::Editor, Role::Owner],
+        Create => &[Role::Contributor, Role::Editor, Role::Owner],
+        Update => &[Role::Editor, Role::Owner],
+        Delete => &[Role::Owner],
+        Share => &[Role::Owner],
+        Manage => &[Role::Owner],
+    }
 }
 
 impl Grant {
@@ -225,7 +345,7 @@ impl Grant {
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Resource type without an id — used to filter paginated grant queries by
-/// type. Mirrors the `resource_type` column values in `storage.access_grants`.
+/// type. Mirrors the `resource_type` column values in `storage.role_grants`.
 /// Add new variants here when new resource types are supported.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ResourceKind {

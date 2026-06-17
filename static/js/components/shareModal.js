@@ -74,23 +74,6 @@ function _looksLikeEmail(q) {
 }
 
 /**
- * Permissions that belong to each role (mirrors `Role::expand()` in
- * `src/application/dtos/grant_dto.rs`). The share modal only renders
- * Viewer/Editor/Owner as picker buttons today; `commenter` and
- * `contributor` are kept here for fidelity with the server-side enum so
- * a future UI exposure doesn't need a mirror-table update. The `manage`
- * permission in the owner bundle is reserved for Drive- and Group-level
- * admin actions (no-op on file/folder resources).
- */
-const ROLE_PERMISSIONS = {
-    viewer: ['read'],
-    commenter: ['read', 'comment'],
-    contributor: ['read', 'create'],
-    editor: ['read', 'comment', 'create', 'update'],
-    owner: ['read', 'comment', 'create', 'update', 'share', 'delete', 'manage']
-};
-
-/**
  * Fetch up to ~8 ReBAC subject groups whose name matches `q`. Authenticated
  * endpoint; returns `[]` on any failure so the autocomplete degrades to
  * contacts-only rather than breaking the dialog.
@@ -117,14 +100,20 @@ async function _searchGroups(q) {
 }
 
 /**
- * Derive the highest role a set of grants represents for one subject.
+ * Pick the displayed role for a member row. Server-side every Grant
+ * carries an explicit role since the cleanup PR, so this just reads it.
+ * The server may emit `commenter` or `contributor` (full enum), but the
+ * picker only exposes Viewer/Editor/Owner — collapse the two unexposed
+ * roles to the closest neighbour so the UI never renders an unknown
+ * option.
  * @param {Grant[]} subjectGrants
  * @returns {ShareRoleEnum}
  */
 function _roleFromGrants(subjectGrants) {
-    const perms = new Set(subjectGrants.map((g) => g.permission));
-    if (perms.has('delete') || perms.has('share')) return 'owner';
-    if (perms.has('create') || perms.has('update')) return 'editor';
+    const role = subjectGrants[0]?.role;
+    if (role === 'owner' || role === 'editor' || role === 'viewer') return role;
+    if (role === 'commenter') return 'viewer';
+    if (role === 'contributor') return 'editor';
     return 'viewer';
 }
 
@@ -616,7 +605,7 @@ const shareModal = {
                 granted_at: '',
                 granted_by: '',
                 subject: { type: subjectType, id: contact.id },
-                permission: /** @type {import('../core/types.js').PermissionTypeEnum} */ (ROLE_PERMISSIONS[this._stagedRole][0]),
+                role: this._stagedRole,
                 resource: { type: this._itemType, id: this._item?.id ?? '' }
             };
             this._localMembers.push({

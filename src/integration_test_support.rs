@@ -42,7 +42,7 @@ pub fn test_db_url() -> String {
 /// OnceCell so concurrent test threads block until the first caller
 /// finishes; subsequent calls are zero-cost.
 ///
-/// Order matters: `storage.access_grants` rows go first because there's
+/// Order matters: `storage.role_grants` rows go first because there's
 /// no FK from there to `auth.subject_groups` (the service's `delete`
 /// path does this transactionally; here we bypass the service).
 static CLEANUP_ONCE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
@@ -51,7 +51,7 @@ pub async fn ensure_clean_test_db(pool: &PgPool) {
     CLEANUP_ONCE
         .get_or_init(|| async {
             let _ = sqlx::query(
-                "DELETE FROM storage.access_grants
+                "DELETE FROM storage.role_grants
                   WHERE subject_type = 'group'
                     AND subject_id IN (
                         SELECT id FROM auth.subject_groups WHERE name LIKE 'rust-test-%'

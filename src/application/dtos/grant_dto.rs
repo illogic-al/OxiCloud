@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::application::dtos::cursor::{CursorListResponse, CursorQuery, PageCursor};
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
-use crate::domain::services::authorization::{Grant, Permission, Resource, Subject};
+use crate::domain::services::authorization::{Grant, Permission, Resource, Role, Subject};
 
 // ════════════════════════════════════════════════════════════════════════════
 // Subject / Resource / Permission DTOs
@@ -130,166 +130,50 @@ impl From<Permission> for PermissionDto {
 // Roles — the load-bearing model for ReBAC grants
 // ════════════════════════════════════════════════════════════════════════════
 //
-// Today a role is "DTO-layer sugar" — every grant write expands a role into
-// N rows in `storage.access_grants`. The D-Prep refactor (see
-// `docs/plan/drive.md` §Prerequisite + migration `20260730000000_role_grants.sql`)
-// pushes the role down to storage (`storage.role_grants.role TEXT`); the
-// engine reads the role and expands the bundle at query time via this same
-// `expand()` function. Adding a role is now schema-free — one variant + one
-// match arm here.
+// One row per role assignment in `storage.role_grants.role` (a
+// `storage.grant_role` ENUM). The engine expands the bundle at query time
+// via `Role::expand()` on the domain enum. Adding a role is two edits:
+// the variant + match arm on `Role`, and an `ALTER TYPE
+// storage.grant_role ADD VALUE 'name'` migration.
 
+/// Wire-format wrapper around the domain `Role` enum. Carries the
+/// serde/utoipa derives. Maps 1:1 to/from `Role` via `From`.
+///
+/// The historical `"admin"` alias for `Owner` (used during the D-Prep
+/// dual-write window for cached clients) has been retired in the cleanup
+/// PR — the OxiCloud UI emits `"owner"` exclusively. Stragglers receive
+/// a 422 on POST/PUT, which surfaces the upgrade cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum Role {
-    /// Read access only. The default "anyone can look but not touch".
+pub enum RoleDto {
     Viewer,
-    /// Read + comment. Useful for review-only stakeholders.
     Commenter,
-    /// Read + create. The "drop-zone" role — uploads allowed, existing
-    /// content untouchable. Common for support-ticket attachments and
-    /// photo-submission folders.
     Contributor,
-    /// Read + create + update + comment. The standard collaboration role.
     Editor,
-    /// Full bundle: read, create, update, comment, delete, share — and
-    /// `Manage` for resource types that support it (drives, groups). This
-    /// is the highest user-grantable role; renamed from the historical
-    /// `Admin` to disambiguate from `UserRole::Admin` (the user-account
-    /// privilege) and to match Drive plan terminology.
-    ///
-    /// **Wire-format compat shim** (one release): also deserialises from
-    /// the legacy `"admin"` string so cached frontend clients keep
-    /// working until they refresh. Serialisation always emits `"owner"`.
-    /// Drop the alias in the cleanup PR.
-    #[serde(alias = "admin")]
     Owner,
 }
 
-impl Role {
-    /// Expand the role into its permission bundle. Single source of truth —
-    /// any code that needs "does this role include Permission X?" routes
-    /// through here (or its inverse, `roles_implying`).
-    ///
-    /// After D-Prep this is called at engine read time (1 row → bundle
-    /// expanded server-side). Pre-D-Prep it was called at API write time
-    /// (1 role → N rows fanned out).
-    pub fn expand(self) -> &'static [Permission] {
-        match self {
-            Role::Viewer => &[Permission::Read],
-            Role::Commenter => &[Permission::Read, Permission::Comment],
-            Role::Contributor => &[Permission::Read, Permission::Create],
-            Role::Editor => &[
-                Permission::Read,
-                Permission::Comment,
-                Permission::Create,
-                Permission::Update,
-            ],
-            Role::Owner => &[
-                Permission::Read,
-                Permission::Comment,
-                Permission::Create,
-                Permission::Update,
-                Permission::Share,
-                Permission::Delete,
-                Permission::Manage,
-            ],
+impl From<RoleDto> for Role {
+    fn from(r: RoleDto) -> Self {
+        match r {
+            RoleDto::Viewer => Role::Viewer,
+            RoleDto::Commenter => Role::Commenter,
+            RoleDto::Contributor => Role::Contributor,
+            RoleDto::Editor => Role::Editor,
+            RoleDto::Owner => Role::Owner,
         }
     }
-
-    /// Lowercase string discriminator — matches the SQL `role` column values
-    /// in `storage.role_grants` and the JSON wire format.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Role::Viewer => "viewer",
-            Role::Commenter => "commenter",
-            Role::Contributor => "contributor",
-            Role::Editor => "editor",
-            Role::Owner => "owner",
-        }
-    }
-
-    /// Parse a role from its SQL / JSON string discriminator. Returns
-    /// `None` for unknown values. Accepts the legacy `"admin"` spelling
-    /// for one release of API compat (clients that cached the old name
-    /// keep working; new responses always emit `"owner"`).
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "viewer" => Some(Role::Viewer),
-            "commenter" => Some(Role::Commenter),
-            "contributor" => Some(Role::Contributor),
-            "editor" => Some(Role::Editor),
-            "owner" => Some(Role::Owner),
-            // Legacy compat: drop after one release once all clients are
-            // updated. Emits a debug log so we can track stragglers.
-            "admin" => {
-                tracing::debug!(
-                    target: "oxicloud::grants",
-                    "Role::parse: accepted legacy 'admin' string as Role::Owner"
-                );
-                Some(Role::Owner)
-            }
-            _ => None,
-        }
-    }
-
-    /// Every role, in a stable order. Used by `roles_implying` and exposed
-    /// to the UI so the share modal can render the full picker without
-    /// hardcoding the list.
-    ///
-    /// **UI scope today**: the share dialog renders only `Viewer`,
-    /// `Editor`, and `Owner` (matches the existing 3-button UX). The
-    /// `Commenter` and `Contributor` variants are implemented server-
-    /// side and accepted on the API surface, reserved for future UI
-    /// exposure when a real use case asks for them. Until then they
-    /// stay invisible to end users — no picker option, no documentation
-    /// surface.
-    ///
-    /// Any role can be granted on any resource type. Permission bundles
-    /// that include capabilities the resource type doesn't check for
-    /// (e.g. `Manage` on a folder, `Create` on a file) simply produce
-    /// harmless no-ops — no separate validation layer is needed.
-    pub const ALL: [Role; 5] = [
-        Role::Viewer,
-        Role::Commenter,
-        Role::Contributor,
-        Role::Editor,
-        Role::Owner,
-    ];
 }
 
-/// Inverse of [`Role::expand`]: returns every role whose bundle contains
-/// the given permission. Used by the engine to build the SQL
-/// `WHERE role IN (...)` filter on hot-path queries like "what drives can
-/// this caller read?":
-///
-/// ```ignore
-/// SELECT resource_id FROM role_grants
-/// WHERE subject_id = $1
-///   AND resource_type = 'drive'
-///   AND role IN (roles_implying(Permission::Read));
-/// ```
-///
-/// Precomputed in code rather than stored in the DB — `Role` and
-/// `Permission` are both small fixed enums, the table can never grow
-/// beyond a handful of rows, and keeping it in-code makes "what changes
-/// when I add a Permission?" a single grep target.
-pub fn roles_implying(permission: Permission) -> &'static [Role] {
-    use Permission::*;
-    match permission {
-        // Every role grants Read — viewer is the floor.
-        Read => &[
-            Role::Viewer,
-            Role::Commenter,
-            Role::Contributor,
-            Role::Editor,
-            Role::Owner,
-        ],
-        Comment => &[Role::Commenter, Role::Editor, Role::Owner],
-        Create => &[Role::Contributor, Role::Editor, Role::Owner],
-        Update => &[Role::Editor, Role::Owner],
-        Delete => &[Role::Owner],
-        Share => &[Role::Owner],
-        Manage => &[Role::Owner],
+impl From<Role> for RoleDto {
+    fn from(r: Role) -> Self {
+        match r {
+            Role::Viewer => RoleDto::Viewer,
+            Role::Commenter => RoleDto::Commenter,
+            Role::Contributor => RoleDto::Contributor,
+            Role::Editor => RoleDto::Editor,
+            Role::Owner => RoleDto::Owner,
+        }
     }
 }
 
@@ -325,17 +209,18 @@ pub enum SubjectInputDto {
     },
 }
 
-/// `POST /api/grants` — accepts either `permissions` (explicit) or `role`.
-/// Server-side validation requires exactly one of the two to be present.
+/// `POST /api/grants` — create or refresh a role assignment.
+///
+/// Strictly role-keyed since the cleanup PR: callers send exactly one
+/// role; the engine writes a single row in `storage.role_grants`. The
+/// historical per-permission shape (`permissions: [...]`) was dropped —
+/// the OxiCloud UI is the only known caller and it already sends `role`.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateGrantDto {
     pub subject: SubjectInputDto,
     pub resource: ResourceDto,
-    #[serde(default)]
-    pub permissions: Option<Vec<PermissionDto>>,
-    #[serde(default)]
-    pub role: Option<Role>,
-    /// Optional expiry for every grant in this request. RFC 3339 / ISO 8601.
+    pub role: RoleDto,
+    /// Optional expiry for the grant. RFC 3339 / ISO 8601.
     #[serde(default)]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -345,7 +230,7 @@ pub struct CreateGrantDto {
 pub struct UpdateRoleDto {
     pub subject: SubjectDto,
     pub resource: ResourceDto,
-    pub role: Role,
+    pub role: RoleDto,
     /// Optional expiry applied to every grant written or updated by this call.
     #[serde(default)]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -360,7 +245,10 @@ pub struct GrantDto {
     pub id: Uuid,
     pub subject: SubjectDto,
     pub resource: ResourceDto,
-    pub permission: PermissionDto,
+    /// Role-keyed since D-Prep cleanup — one row in `storage.role_grants`
+    /// is one `GrantDto`. The bundle of underlying permissions is implied
+    /// by the role and recomputed client-side from the same lookup table.
+    pub role: RoleDto,
     pub granted_by: Uuid,
     pub granted_at: chrono::DateTime<chrono::Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -373,7 +261,7 @@ impl From<Grant> for GrantDto {
             id: g.id,
             subject: g.subject.into(),
             resource: g.resource.into(),
-            permission: g.permission.into(),
+            role: g.role.into(),
             granted_by: g.granted_by,
             granted_at: g.granted_at,
             expires_at: g.expires_at,

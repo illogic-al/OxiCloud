@@ -272,8 +272,8 @@ impl SubjectGroupRepository for SubjectGroupPgRepository {
 
     async fn delete(&self, id: Uuid) -> Result<(), SubjectGroupRepositoryError> {
         // The application service is responsible for clearing related
-        // `storage.access_grants` rows in the same transaction (there's no
-        // FK between access_grants and subject_groups). The subject_group_members
+        // `storage.role_grants` rows in the same transaction (there's no
+        // FK between role_grants and subject_groups). The subject_group_members
         // rows cascade automatically via FK.
         let result = sqlx::query("DELETE FROM auth.subject_groups WHERE id = $1")
             .bind(id)

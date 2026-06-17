@@ -122,11 +122,11 @@ Content-Type: application/json
 }
 
 HTTP 201
-# PR N1: POST /api/grants now wraps results in
-# `CreateGrantResponseDto { grants, notification }`.
+# Cleanup PR: one role row per (subject, resource). `CreateGrantResponseDto`
+# wraps a single role-keyed Grant in `.grants[0]`.
 [Asserts]
 jsonpath "$.grants" count == 1
-jsonpath "$.grants[0].permission" == "read"
+jsonpath "$.grants[0].role" == "viewer"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -148,12 +148,13 @@ Authorization: Bearer {{dave_token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$[?(@.resource.id=='{{shared_folder_id}}')].permission" == "read"
+jsonpath "$[?(@.resource.id=='{{shared_folder_id}}')].role" == "viewer"
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 9 — Promote Bob to Admin (adds comment, create, update, share, delete).
-#           PUT /api/grants/role reconciles the row set in one call.
+# Step 9 — Promote Bob to Owner (covers comment, create, update, share,
+#           delete, manage). PUT /api/grants/role replaces the role in one
+#           UPSERT against `storage.role_grants`.
 # ─────────────────────────────────────────────────────────────
 PUT {{base_url}}/api/grants/role
 Authorization: Bearer {{alice_token}}
@@ -161,16 +162,17 @@ Content-Type: application/json
 {
   "subject":  { "type": "user",   "id": "{{dave_user_id}}" },
   "resource": { "type": "folder", "id": "{{shared_folder_id}}" },
-  "role": "admin"
+  "role": "owner"
 }
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 6
+jsonpath "$" count == 1
+jsonpath "$[0].role" == "owner"
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 10 — Bob can now rename (Manager includes update).
+# Step 10 — Bob can now rename (Owner includes update).
 # ─────────────────────────────────────────────────────────────
 PUT {{base_url}}/api/folders/{{shared_folder_id}}/rename
 Authorization: Bearer {{dave_token}}
@@ -194,7 +196,7 @@ HTTP 200
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 12 — Bob re-shares to Carol (he has Share via Admin).
+# Step 12 — Bob re-shares to Carol (he has Share via Owner).
 # ─────────────────────────────────────────────────────────────
 POST {{base_url}}/api/grants
 Authorization: Bearer {{dave_token}}
@@ -218,7 +220,7 @@ Authorization: Bearer {{eve_token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$[?(@.resource.id=='{{shared_folder_id}}')].permission" == "read"
+jsonpath "$[?(@.resource.id=='{{shared_folder_id}}')].role" == "viewer"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -247,7 +249,7 @@ Content-Type: application/json
 HTTP 200
 [Asserts]
 jsonpath "$" count == 1
-jsonpath "$[0].permission" == "read"
+jsonpath "$[0].role" == "viewer"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -263,8 +265,9 @@ HTTP 404
 
 # ─────────────────────────────────────────────────────────────
 # Step 17 — Lifecycle: Alice deletes the folder. The DB trigger
-#           trg_cleanup_grants_folder removes both bob's and carol's
-#           grants automatically (also for the cascade-deleted child).
+#           trg_cleanup_role_grants_folder removes both bob's and
+#           carol's grants automatically (also for the cascade-deleted
+#           child).
 # ─────────────────────────────────────────────────────────────
 DELETE {{base_url}}/api/folders/{{child_folder_id}}
 Authorization: Bearer {{alice_token}}
@@ -767,7 +770,7 @@ HTTP 404
 
 
 # ════════════════════════════════════════════════════════════════════
-# Phase 2D — Promote adam to Admin (all 6 permissions). Delete OK.
+# Phase 2D — Promote adam to Owner (full bundle, incl. delete). Delete OK.
 # ════════════════════════════════════════════════════════════════════
 PUT {{base_url}}/api/grants/role
 Authorization: Bearer {{alice_token}}
@@ -775,7 +778,7 @@ Content-Type: application/json
 {
   "subject":  { "type": "user",   "id": "{{adam_user_id}}" },
   "resource": { "type": "folder", "id": "{{perm_folder_id}}" },
-  "role": "admin"
+  "role": "owner"
 }
 
 HTTP 200
@@ -788,7 +791,7 @@ HTTP 204
 
 # ════════════════════════════════════════════════════════════════════
 # Phase 2E — Lifecycle cleanup. Alice (still the owner) trashes &
-#           empties; the trigger removes all access_grants rows.
+#           empties; the trigger removes all role_grants rows.
 # ════════════════════════════════════════════════════════════════════
 DELETE {{base_url}}/api/folders/{{perm_folder_id}}
 Authorization: Bearer {{alice_token}}
@@ -1176,12 +1179,12 @@ Content-Type: application/json
 {
   "subject":  { "type": "user",   "id": "{{frank_user_id}}" },
   "resource": { "type": "folder", "id": "{{batch_root_id}}" },
-  "role": "admin"
+  "role": "owner"
 }
 
 HTTP 200
 
-# Frank (Admin grant = Delete) trashes batch_file_2 — item goes to
+# Frank (Owner role includes Delete) trashes batch_file_2 — item goes to
 # Alice's trash because file.user_id is unchanged (Alice is still owner).
 POST {{base_url}}/api/batch/trash
 Authorization: Bearer {{frank_token}}

@@ -5,7 +5,7 @@
 //!   - Name validation runs (defence-in-depth alongside the DB CHECK).
 //!   - Virtual groups (e.g. `Internal`) are protected from mutation.
 //!   - Audit events are emitted via `tracing::info!(target = "audit", ...)`.
-//!   - Cascading delete of `storage.access_grants` rows referencing this
+//!   - Cascading delete of `storage.role_grants` rows referencing this
 //!     group runs in the same transaction as the group delete.
 //!
 //! See `migrations/20260612000000_subject_groups.sql` for the schema.
@@ -172,9 +172,9 @@ impl SubjectGroupService {
 
     /// Delete the group; cascades to:
     ///   - `auth.subject_group_members` rows (FK CASCADE).
-    ///   - `storage.access_grants` rows where `subject_type='group'` and
+    ///   - `storage.role_grants` rows where `subject_type='group'` and
     ///     `subject_id = id` (handled here, no FK exists between
-    ///     `access_grants` and `subject_groups`).
+    ///     `role_grants` and `subject_groups`).
     pub async fn delete(&self, id: Uuid, caller_id: Uuid) -> Result<(), DomainError> {
         let existing = self.get_by_id(id).await?;
         if existing.is_virtual {
@@ -196,7 +196,7 @@ impl SubjectGroupService {
         })?;
 
         let grants_deleted = sqlx::query(
-            "DELETE FROM storage.access_grants
+            "DELETE FROM storage.role_grants
               WHERE subject_type = 'group' AND subject_id = $1",
         )
         .bind(id)
@@ -519,9 +519,9 @@ mod integration_tests {
 
     // ── 13. Grants are revoked atomically when a group is deleted ──────────
     //
-    // The plan said "FK CASCADE", but there's no FK between `access_grants`
-    // and `subject_groups` (different schemas; the cascade is handled by the
-    // service's transactional DELETE). This test pins that behaviour.
+    // There is no FK between `storage.role_grants` and `auth.subject_groups`
+    // (different schemas); the cascade is handled by the service's
+    // transactional DELETE. This test pins that behaviour.
     #[tokio::test]
     async fn test_grants_revoked_when_group_deleted() {
         let svc = make_service().await;
@@ -534,21 +534,21 @@ mod integration_tests {
             .unwrap();
         let resource_id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO storage.access_grants \
+            "INSERT INTO storage.role_grants \
              (subject_type, subject_id, resource_type, resource_id, \
-              permission, granted_by) \
-             VALUES ('group', $1, 'folder', $2, 'read', $3)",
+              role, granted_by) \
+             VALUES ('group', $1, 'folder', $2, 'viewer', $3)",
         )
         .bind(group.id)
         .bind(resource_id)
         .bind(admin)
         .execute(svc.pool.as_ref())
         .await
-        .expect("insert grant row");
+        .expect("insert role_grants row");
 
         // Sanity: the grant exists.
         let pre: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM storage.access_grants \
+            "SELECT COUNT(*) FROM storage.role_grants \
               WHERE subject_type = 'group' AND subject_id = $1",
         )
         .bind(group.id)
@@ -561,7 +561,7 @@ mod integration_tests {
         svc.delete(group.id, admin).await.unwrap();
 
         let post: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM storage.access_grants \
+            "SELECT COUNT(*) FROM storage.role_grants \
               WHERE subject_type = 'group' AND subject_id = $1",
         )
         .bind(group.id)

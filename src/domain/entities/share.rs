@@ -12,7 +12,7 @@ pub struct Share {
     item_type: ShareItemType,
     token: String,
     password_hash: Option<String>,
-    /// Derived from `storage.access_grants.expires_at` — not stored on the share row.
+    /// Derived from `storage.role_grants.expires_at` — not stored on the share row.
     expires_at: Option<u64>,
     created_at: u64,
     created_by: Uuid,

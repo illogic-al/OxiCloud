@@ -1,13 +1,14 @@
 //! PostgreSQL-backed implementation of `AuthorizationEngine`.
 //!
-//! Stores grants in `storage.access_grants` (see migration
-//! `20260520000000_rebac_access_grants.sql`). Cascading is resolved at check
-//! time via PostgreSQL `ltree` `@>` (ancestor-of) on `storage.folders.lpath`,
-//! using the existing GiST index for O(log N) traversal.
+//! Stores grants in `storage.role_grants` (one role per (subject, resource)
+//! pair; the role's permission bundle is expanded in code via
+//! `Role::expand()`). Cascading is resolved at check time via PostgreSQL
+//! `ltree` `@>` (ancestor-of) on `storage.folders.lpath`, using the
+//! existing GiST index for O(log N) traversal.
 //!
 //! Owner is implicit — `storage.folders.user_id` / `storage.files.user_id`
 //! are checked first via dedicated helpers; if the caller is the owner, no
-//! SQL against `access_grants` happens.
+//! SQL against `role_grants` happens.
 //!
 //! ## Lifecycle cleanup
 //!
@@ -37,14 +38,13 @@ use uuid::Uuid;
 use moka::future::Cache;
 use sqlx::PgPool;
 
-use crate::application::dtos::grant_dto::roles_implying;
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::common::errors::DomainError;
 use crate::domain::entities::subject_group::INTERNAL_GROUP_ID;
 use crate::domain::repositories::subject_group_repository::SubjectGroupRepository;
 use crate::domain::services::authorization::{
     Grant, GrantCursor, IncomingGrantSummary, OutgoingGrantEntry, OutgoingResourceSummary,
-    Permission, Resource, ResourceKind, Subject,
+    Permission, Resource, ResourceKind, Role, Subject, roles_implying,
 };
 use crate::infrastructure::repositories::pg::SubjectGroupPgRepository;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
@@ -206,7 +206,7 @@ impl PgAclEngine {
     }
 
     /// Expand a caller's `Subject` into the `(subject_types, subject_ids)`
-    /// pair that should be matched in `storage.access_grants`. For User
+    /// pair that should be matched in `storage.role_grants`. For User
     /// callers this is `(["user","group"], [uid, …transitive groups, INTERNAL])`;
     /// for any non-user subject (Token / External / Group as direct caller)
     /// it's a single-element pair with no cascade.
@@ -239,8 +239,8 @@ impl PgAclEngine {
     }
 
     /// Convert a `Permission` into the array of role strings whose bundle
-    /// includes it — used to bind the `g.role = ANY($N::text[])` filter on
-    /// every cascade / lookup query that reads `storage.role_grants`.
+    /// includes it — bound as `ANY($N::storage.grant_role[])` so the
+    /// ENUM-typed `role` column compares without an implicit text cast.
     ///
     /// This is the inverse of `Role::expand()`, precomputed via
     /// `grant_dto::roles_implying()`. The mapping is small and static (≤5
@@ -264,11 +264,10 @@ impl PgAclEngine {
     /// `subject_ids` is the expanded set returned by `expand_user` (or a
     /// single-element vec for non-user callers).
     ///
-    /// **D-Prep**: now reads `storage.role_grants` (1 row per role
-    /// assignment) instead of `storage.access_grants` (N rows per role).
-    /// The permission filter `g.permission = $3` becomes
-    /// `g.role = ANY($3::text[])` where the array is the set of roles whose
-    /// bundle includes the requested permission — see `roles_implying()`.
+    /// Reads `storage.role_grants` (1 row per role assignment); a permission
+    /// filter `g.permission = $3` becomes `g.role = ANY($3::storage.grant_role[])` where
+    /// the array is the set of roles whose bundle includes the requested
+    /// permission — see `roles_implying()`.
     ///
     /// Uses the GiST index on `storage.folders.lpath` for O(log N) cascade.
     async fn folder_cascade_grant_exists(
@@ -288,7 +287,7 @@ impl PgAclEngine {
               JOIN storage.folders gf ON gf.id = g.resource_id
              WHERE g.subject_type  = ANY($1)
                AND g.subject_id    = ANY($2)
-               AND g.role          = ANY($3::text[])
+               AND g.role          = ANY($3::storage.grant_role[])
                AND g.resource_type = 'folder'
                AND (g.expires_at IS NULL OR g.expires_at > NOW())
                AND gf.lpath @> (SELECT lpath FROM storage.folders WHERE id = $4)
@@ -329,7 +328,7 @@ impl PgAclEngine {
                   FROM storage.role_grants
                  WHERE subject_type = ANY($1)
                    AND subject_id   = ANY($2)
-                   AND role         = ANY($3::text[])
+                   AND role         = ANY($3::storage.grant_role[])
                    AND resource_type = 'file' AND resource_id = $4
                    AND (expires_at IS NULL OR expires_at > NOW())
                 UNION ALL
@@ -340,7 +339,7 @@ impl PgAclEngine {
                   JOIN storage.files target_f ON target_f.id = $4
                  WHERE g.subject_type  = ANY($1)
                    AND g.subject_id    = ANY($2)
-                   AND g.role          = ANY($3::text[])
+                   AND g.role          = ANY($3::storage.grant_role[])
                    AND g.resource_type = 'folder'
                    AND (g.expires_at IS NULL OR g.expires_at > NOW())
                    AND target_f.folder_id IS NOT NULL
@@ -361,39 +360,16 @@ impl PgAclEngine {
         Ok(exists.is_some())
     }
 
-    /// Look up a single grant by id. Returns `(resource, granted_by)` so
-    /// the REST `DELETE /api/grants/{id}` handler can decide authorization
-    /// without a second round-trip. Returns `Ok(None)` if no such grant.
-    pub async fn find_grant_by_id(
-        &self,
-        grant_id: Uuid,
-    ) -> Result<Option<(Resource, Uuid)>, DomainError> {
-        let row: Option<(String, Uuid, Uuid)> = sqlx::query_as(
-            "SELECT resource_type, resource_id, granted_by FROM storage.access_grants WHERE id = $1",
-        )
-        .bind(grant_id)
-        .fetch_optional(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("PgAcl", format!("find_grant_by_id: {e}")))?;
-
-        let Some((rt, rid, granter)) = row else {
-            return Ok(None);
-        };
-        let res = Resource::from_parts(&rt, rid)
-            .ok_or_else(|| DomainError::internal_error("PgAcl", "unknown resource_type"))?;
-        Ok(Some((res, granter)))
-    }
-
-    /// Variant of `find_grant_by_id` that also returns the subject —
-    /// needed by `POST /api/grants/{id}/notify` to resolve who to email.
-    /// Returns `(subject, resource, granted_by)` or `None`.
+    /// Look up a single role grant by id, returning the actors a revoke /
+    /// notify handler needs to make a decision without a second round-trip.
+    /// Returns `(subject, resource, granted_by)` or `None` if no such row.
     pub async fn find_grant_full_by_id(
         &self,
         grant_id: Uuid,
     ) -> Result<Option<(Subject, Resource, Uuid)>, DomainError> {
         let row: Option<(String, Uuid, String, Uuid, Uuid)> = sqlx::query_as(
             "SELECT subject_type, subject_id, resource_type, resource_id, granted_by \
-             FROM storage.access_grants WHERE id = $1",
+             FROM storage.role_grants WHERE id = $1",
         )
         .bind(grant_id)
         .fetch_optional(self.pool.as_ref())
@@ -410,8 +386,14 @@ impl PgAclEngine {
         Ok(Some((subject, resource, granter)))
     }
 
-    /// Row type for all full-grant SELECT queries:
-    /// (id, subject_type, subject_id, resource_type, resource_id, permission, granted_by, granted_at, expires_at)
+    /// Row type for `storage.role_grants` SELECTs:
+    /// (id, subject_type, subject_id, resource_type, resource_id, role, granted_by, granted_at, expires_at).
+    ///
+    /// Builds a single role-keyed `Grant` per row. `Grant` is role-keyed
+    /// since the D-Prep cleanup PR — every listing method returns role
+    /// rows directly; bundle expansion to per-permission Grants no longer
+    /// happens here. Callers that need the permission set use
+    /// `grant.role.expand()` at the call site.
     #[allow(clippy::type_complexity)]
     fn row_to_grant(
         row: (
@@ -430,13 +412,13 @@ impl PgAclEngine {
             .ok_or_else(|| DomainError::internal_error("PgAcl", "unknown subject_type"))?;
         let resource = Resource::from_parts(&row.3, row.4)
             .ok_or_else(|| DomainError::internal_error("PgAcl", "unknown resource_type"))?;
-        let permission = Permission::parse(&row.5)
-            .ok_or_else(|| DomainError::internal_error("PgAcl", "unknown permission"))?;
+        let role = Role::parse(&row.5)
+            .ok_or_else(|| DomainError::internal_error("PgAcl", "unknown role"))?;
         Ok(Grant {
             id: row.0,
             subject,
             resource,
-            permission,
+            role,
             granted_by: row.6,
             granted_at: row.7,
             expires_at: row.8,
@@ -554,15 +536,14 @@ impl AuthorizationEngine for PgAclEngine {
         result
     }
 
-    async fn list_incoming_grants(
-        &self,
-        subject: Subject,
-        permission_filter: Option<Permission>,
-    ) -> Result<Vec<Grant>, DomainError> {
-        let perm_str = permission_filter.map(|p| p.as_str().to_string());
+    async fn list_incoming_grants(&self, subject: Subject) -> Result<Vec<Grant>, DomainError> {
         let counters = QueryCounters::default();
         let (subject_types, subject_ids) = self.subject_match_set(subject, &counters).await?;
 
+        // `ORDER BY role ASC` exploits the `storage.grant_role` ENUM
+        // declared as `(owner, editor, contributor, commenter, viewer)`,
+        // so the sort order matches the UX requirement ("Owner > Editor
+        // > Contributor > Commenter > Viewer") without a per-row CASE.
         let rows = sqlx::query_as::<
             _,
             (
@@ -579,18 +560,16 @@ impl AuthorizationEngine for PgAclEngine {
         >(
             r#"
             SELECT id, subject_type, subject_id, resource_type, resource_id,
-                   permission, granted_by, granted_at, expires_at
-              FROM storage.access_grants
+                   role::text, granted_by, granted_at, expires_at
+              FROM storage.role_grants
              WHERE subject_type = ANY($1)
                AND subject_id   = ANY($2)
-               AND ($3::text IS NULL OR permission = $3)
-             ORDER BY granted_at DESC
-             LIMIT $4
+             ORDER BY role ASC, granted_at DESC
+             LIMIT $3
             "#,
         )
         .bind(&subject_types)
         .bind(&subject_ids)
-        .bind(perm_str)
         .bind(MAX_GRANT_ROWS + 1)
         .fetch_all(self.pool.as_ref())
         .await
@@ -621,7 +600,12 @@ impl AuthorizationEngine for PgAclEngine {
         // NULL otherwise.  This lets every sort mode share a single query_as call.
         //   0 resource_type  String
         //   1 resource_id    Uuid
-        //   2 permissions    Vec<String>
+        //   2 roles          Vec<String>  — every distinct role granting access to this
+        //                                   resource (post-D-Prep). Expanded to permissions
+        //                                   in `IncomingGrantSummary` via `Role::expand()`.
+        //                                   Multiple entries possible when a user has both
+        //                                   a direct grant and a group-mediated grant on
+        //                                   the same resource.
         //   3 granted_at     DateTime<Utc>
         //   4 granted_by     Uuid
         //   5 sort_str       Option<String>  — resource_name (name/type) or owner_name (granted_by)
@@ -653,14 +637,20 @@ impl AuthorizationEngine for PgAclEngine {
         // is `(["user","group"], [uid, …transitive groups, INTERNAL])` so the
         // listing includes every resource the user can reach via a group
         // grant (matching what `check()` allows). See `subject_match_set`.
+        //
+        // Post-D-Prep this reads `storage.role_grants` and aggregates the
+        // ENUM-typed `role` column into a text array. Multiple roles can
+        // appear per resource when the caller reaches it via both a direct
+        // grant and a group-mediated grant — the union of role bundles
+        // produces the displayed permission set in Rust below.
         const AGG: &str = r#"agg AS (
             SELECT
                 resource_type,
                 resource_id,
-                array_agg(DISTINCT permission ORDER BY permission) AS permissions,
+                array_agg(DISTINCT role::text ORDER BY role::text) AS roles,
                 MIN(granted_at)                                    AS granted_at,
                 (array_agg(granted_by ORDER BY granted_at))[1]    AS granted_by
-            FROM storage.access_grants
+            FROM storage.role_grants
             WHERE subject_type = ANY($1)
               AND subject_id   = ANY($2)
               AND ($3::text[] IS NULL OR resource_type = ANY($3))
@@ -725,7 +715,7 @@ impl AuthorizationEngine for PgAclEngine {
                         LEFT JOIN storage.folders f  ON f.id  = agg.resource_id AND agg.resource_type = 'folder'
                         LEFT JOIN storage.files   fi ON fi.id = agg.resource_id AND agg.resource_type = 'file'
                     )
-                    SELECT resource_type, resource_id, permissions, granted_at, granted_by, sort_str, sort_int
+                    SELECT resource_type, resource_id, roles, granted_at, granted_by, sort_str, sort_int
                     FROM named
                     WHERE {where_clause}
                     ORDER BY {order_clause}
@@ -765,7 +755,7 @@ impl AuthorizationEngine for PgAclEngine {
                         FROM agg
                         LEFT JOIN auth.users u ON u.id = agg.granted_by
                     )
-                    SELECT resource_type, resource_id, permissions, granted_at, granted_by, sort_str, sort_int
+                    SELECT resource_type, resource_id, roles, granted_at, granted_by, sort_str, sort_int
                     FROM owner_named
                     WHERE {where_clause}
                     ORDER BY {order_clause}
@@ -793,7 +783,7 @@ impl AuthorizationEngine for PgAclEngine {
                 };
                 format!(
                     r#"WITH {AGG}
-                    SELECT resource_type, resource_id, permissions, granted_at, granted_by,
+                    SELECT resource_type, resource_id, roles, granted_at, granted_by,
                            NULL::text   AS sort_str,
                            NULL::bigint AS sort_int
                     FROM agg
@@ -875,14 +865,21 @@ impl AuthorizationEngine for PgAclEngine {
         };
 
         // ── Convert rows to domain summaries ──────────────────────────────────
+        // Post-D-Prep: the SQL aggregate produces a `roles` text array. We
+        // expand each role's bundle and union them — direct grants and
+        // group-mediated grants on the same resource collapse to a single
+        // deduplicated permission set, matching the pre-pivot behaviour.
         let summaries = rows
             .into_iter()
-            .filter_map(|(rt, rid, perms_str, granted_at, granted_by, _, _)| {
+            .filter_map(|(rt, rid, roles_str, granted_at, granted_by, _, _)| {
                 let resource_type = ResourceKind::parse(&rt)?;
-                let permissions = perms_str
+                let mut permissions: Vec<Permission> = roles_str
                     .into_iter()
-                    .filter_map(|s| Permission::parse(&s))
+                    .filter_map(|s| Role::parse(&s))
+                    .flat_map(|r| r.expand().iter().copied())
                     .collect();
+                permissions.sort_by_key(|p| p.as_str());
+                permissions.dedup();
                 Some(IncomingGrantSummary {
                     resource_type,
                     resource_id: rid,
@@ -897,6 +894,14 @@ impl AuthorizationEngine for PgAclEngine {
     }
 
     async fn list_grants_on_resource(&self, resource: Resource) -> Result<Vec<Grant>, DomainError> {
+        // Pivoted to `storage.role_grants` (see `list_incoming_grants`).
+        // Each role row expands to N permission-keyed `Grant` rows via
+        // `role_row_to_grants` until the public `Grant` shape becomes
+        // role-keyed.
+        //
+        // `ORDER BY role ASC` exploits the `storage.grant_role` ENUM's
+        // declaration order (owner first → viewer last) so the share
+        // dialog's "who has access" list shows strongest grants on top.
         let rows = sqlx::query_as::<
             _,
             (
@@ -913,11 +918,11 @@ impl AuthorizationEngine for PgAclEngine {
         >(
             r#"
             SELECT id, subject_type, subject_id, resource_type, resource_id,
-                   permission, granted_by, granted_at, expires_at
-              FROM storage.access_grants
+                   role::text, granted_by, granted_at, expires_at
+              FROM storage.role_grants
              WHERE resource_type = $1
                AND resource_id   = $2
-             ORDER BY granted_at DESC
+             ORDER BY role ASC, granted_at DESC
              LIMIT $3
             "#,
         )
@@ -942,7 +947,10 @@ impl AuthorizationEngine for PgAclEngine {
     ) -> Result<(Vec<OutgoingResourceSummary>, Option<GrantCursor>), DomainError> {
         let fetch_limit = (limit as i64) + 1;
 
-        // Row shape — one row per (resource, subject, permission).
+        // Row shape — post-D-Prep, one row per (resource, subject) since
+        // `storage.role_grants` carries exactly one role per pair (UNIQUE
+        // constraint). Permission bundles are expanded in the row consumer
+        // via `Role::expand()`.
         // Columns:
         //   0  resource_type   String
         //   1  resource_id     Uuid
@@ -951,9 +959,9 @@ impl AuthorizationEngine for PgAclEngine {
         //   4  subject_id      Uuid
         //   5  subject_display String          — username or share item_name
         //   6  grant_id        Uuid
-        //   7  granted_at      DateTime<Utc>   — this (subject, perm) row
+        //   7  granted_at      DateTime<Utc>   — this (subject, role) row
         //   8  expires_at      Option<DateTime<Utc>>
-        //   9  permission      String
+        //   9  role            String          — `grant_role` ENUM as text
         //  10  sort_str        Option<String>
         //  11  sort_int        Option<i64>
         //  12  has_password    bool            — token: shares.password_hash IS NOT NULL
@@ -1040,7 +1048,7 @@ impl AuthorizationEngine for PgAclEngine {
                                    CASE WHEN ag.resource_type = 'file'   THEN fi.name END
                                ) AS sort_str,
                                {sort_int_expr} AS sort_int
-                        FROM storage.access_grants ag
+                        FROM storage.role_grants ag
                         LEFT JOIN storage.folders f  ON f.id  = ag.resource_id AND ag.resource_type = 'folder'
                         LEFT JOIN storage.files   fi ON fi.id = ag.resource_id AND ag.resource_type = 'file'
                         WHERE ag.granted_by = $1
@@ -1055,12 +1063,12 @@ impl AuthorizationEngine for PgAclEngine {
                     SELECT ag.resource_type, ag.resource_id, rp.first_shared_at,
                            ag.subject_type, ag.subject_id,
                            COALESCE(u.username, u.email, sg.name::text, sh.item_name, fi.name, fld.name, ag.subject_id::text) AS subject_display,
-                           ag.id AS grant_id, ag.granted_at, ag.expires_at, ag.permission,
+                           ag.id AS grant_id, ag.granted_at, ag.expires_at, ag.role::text AS role,
                            rp.sort_str, rp.sort_int,
                            (sh.password_hash IS NOT NULL) AS has_password,
                            COALESCE(u.is_external, FALSE) AS is_external
                     FROM rp
-                    JOIN storage.access_grants ag
+                    JOIN storage.role_grants ag
                       ON ag.resource_type = rp.resource_type AND ag.resource_id = rp.resource_id
                      AND ag.granted_by = $1
                     LEFT JOIN auth.users u   ON ag.subject_type = 'user'  AND u.id   = ag.subject_id
@@ -1129,7 +1137,7 @@ impl AuthorizationEngine for PgAclEngine {
                                 ELSE 3
                             END)::bigint AS sort_int,
                             MIN(ag.granted_at) AS first_granted_at
-                        FROM storage.access_grants ag
+                        FROM storage.role_grants ag
                         LEFT JOIN auth.users u
                                ON ag.subject_type = 'user' AND u.id = ag.subject_id
                         LEFT JOIN auth.subject_groups sg
@@ -1160,13 +1168,13 @@ impl AuthorizationEngine for PgAclEngine {
                         ag.id                  AS grant_id,
                         ag.granted_at,
                         ag.expires_at,
-                        ag.permission,
+                        ag.role::text          AS role,
                         LOWER(rp.subject_display) AS sort_str,
                         rp.sort_int,
                         rp.has_password,
                         rp.is_external
                     FROM rp
-                    JOIN storage.access_grants ag
+                    JOIN storage.role_grants ag
                       ON ag.resource_type = rp.resource_type
                      AND ag.resource_id   = rp.resource_id
                      AND ag.subject_type  = rp.subject_type
@@ -1180,7 +1188,12 @@ impl AuthorizationEngine for PgAclEngine {
                 // Page on (role_order, subject_display, resource_id) triples so that all
                 // of one person's grants within a role are contiguous — enabling aggregation
                 // ("Bob on Folder A, Folder B") to work correctly across cursor pages.
-                // role_order: 0 = admin (has delete+share), 1 = editor (has create or update), 2 = viewer
+                //
+                // role_order matches the `storage.grant_role` ENUM declaration
+                // order (strongest first) via `array_position`, so
+                // `sort_int ASC` matches the UX requirement: 1 = owner,
+                // 2 = editor, 3 = contributor, 4 = commenter, 5 = viewer.
+                // 1-based because `array_position` is.
                 // Cursor: sort_int=role_order, resource_name=LOWER(subject_display), resource_id
                 let (page_where, page_order) = if reverse {
                     (
@@ -1209,15 +1222,20 @@ impl AuthorizationEngine for PgAclEngine {
                             MAX(COALESCE(u.username, u.email, sh.item_name, ag.subject_id::text)) AS subject_display,
                             BOOL_OR(sh.password_hash IS NOT NULL) AS has_password,
                             COALESCE(BOOL_OR(u.is_external), FALSE) AS is_external,
-                            CASE
-                                WHEN BOOL_OR(ag.permission = 'delete')
-                                 AND BOOL_OR(ag.permission = 'share')  THEN 0
-                                WHEN BOOL_OR(ag.permission = 'create')
-                                  OR BOOL_OR(ag.permission = 'update') THEN 1
-                                ELSE 2
-                            END::bigint AS sort_int,
+                            -- One role per (resource, subject) post-D-Prep
+                            -- (UNIQUE constraint on role_grants), so MAX
+                            -- returns that single row's role. `array_position`
+                            -- against the ENUM's declaration order produces a
+                            -- 1-based rank: owner=1 → viewer=5. Strength
+                            -- ordering tracks the ENUM declaration — adding
+                            -- a new role between owner and viewer doesn't
+                            -- need a parallel CASE update here.
+                            array_position(
+                                enum_range(NULL::storage.grant_role),
+                                MAX(ag.role)
+                            )::bigint AS sort_int,
                             MIN(ag.granted_at) AS first_granted_at
-                        FROM storage.access_grants ag
+                        FROM storage.role_grants ag
                         LEFT JOIN auth.users u
                                ON ag.subject_type = 'user' AND u.id = ag.subject_id
                         LEFT JOIN storage.shares sh
@@ -1246,13 +1264,13 @@ impl AuthorizationEngine for PgAclEngine {
                         ag.id                  AS grant_id,
                         ag.granted_at,
                         ag.expires_at,
-                        ag.permission,
+                        ag.role::text          AS role,
                         LOWER(rp.subject_display) AS sort_str,
                         rp.sort_int,
                         rp.has_password,
                         rp.is_external
                     FROM rp
-                    JOIN storage.access_grants ag
+                    JOIN storage.role_grants ag
                       ON ag.resource_type = rp.resource_type
                      AND ag.resource_id   = rp.resource_id
                      AND ag.subject_type  = rp.subject_type
@@ -1284,7 +1302,7 @@ impl AuthorizationEngine for PgAclEngine {
                         SELECT resource_type, resource_id, MIN(granted_at) AS first_shared_at,
                                NULL::text   AS sort_str,
                                NULL::bigint AS sort_int
-                        FROM storage.access_grants
+                        FROM storage.role_grants
                         WHERE granted_by = $1
                         GROUP BY resource_type, resource_id
                     ),
@@ -1297,12 +1315,12 @@ impl AuthorizationEngine for PgAclEngine {
                     SELECT ag.resource_type, ag.resource_id, rp.first_shared_at,
                            ag.subject_type, ag.subject_id,
                            COALESCE(u.username, u.email, sh.item_name, fi.name, fld.name, ag.subject_id::text) AS subject_display,
-                           ag.id AS grant_id, ag.granted_at, ag.expires_at, ag.permission,
+                           ag.id AS grant_id, ag.granted_at, ag.expires_at, ag.role::text AS role,
                            NULL::text AS sort_str, NULL::bigint AS sort_int,
                            (sh.password_hash IS NOT NULL) AS has_password,
                            COALESCE(u.is_external, FALSE) AS is_external
                     FROM rp
-                    JOIN storage.access_grants ag
+                    JOIN storage.role_grants ag
                       ON ag.resource_type = rp.resource_type AND ag.resource_id = rp.resource_id
                      AND ag.granted_by = $1
                     LEFT JOIN auth.users u    ON ag.subject_type = 'user'  AND u.id  = ag.subject_id
@@ -1380,7 +1398,7 @@ impl AuthorizationEngine for PgAclEngine {
                     grant_id,
                     granted_at,
                     expires_at,
-                    perm_str,
+                    role_str,
                     _,
                     _,
                     has_password,
@@ -1389,7 +1407,7 @@ impl AuthorizationEngine for PgAclEngine {
                 let Some(resource_type) = ResourceKind::parse(&rt_str) else {
                     continue;
                 };
-                let Some(perm) = Permission::parse(&perm_str) else {
+                let Some(role) = Role::parse(&role_str) else {
                     continue;
                 };
                 let key = (resource_id, subj_id);
@@ -1409,8 +1427,10 @@ impl AuthorizationEngine for PgAclEngine {
                         },
                     )
                 });
-                if !entry.permissions.contains(&perm) {
-                    entry.permissions.push(perm);
+                for &perm in role.expand() {
+                    if !entry.permissions.contains(&perm) {
+                        entry.permissions.push(perm);
+                    }
                 }
             }
 
@@ -1498,7 +1518,7 @@ impl AuthorizationEngine for PgAclEngine {
                 grant_id,
                 granted_at,
                 expires_at,
-                perm_str,
+                role_str,
                 _,
                 _,
                 has_password,
@@ -1507,7 +1527,7 @@ impl AuthorizationEngine for PgAclEngine {
             let Some(resource_type) = ResourceKind::parse(&rt_str) else {
                 continue;
             };
-            let Some(perm) = Permission::parse(&perm_str) else {
+            let Some(role) = Role::parse(&role_str) else {
                 continue;
             };
 
@@ -1531,8 +1551,10 @@ impl AuthorizationEngine for PgAclEngine {
                     has_password,
                     is_external,
                 });
-            if !entry.permissions.contains(&perm) {
-                entry.permissions.push(perm);
+            for &perm in role.expand() {
+                if !entry.permissions.contains(&perm) {
+                    entry.permissions.push(perm);
+                }
             }
         }
 
@@ -1578,6 +1600,11 @@ impl AuthorizationEngine for PgAclEngine {
     }
 
     async fn list_outgoing_grants(&self, granted_by: Uuid) -> Result<Vec<Grant>, DomainError> {
+        // Pivoted to `storage.role_grants` (see `list_incoming_grants`).
+        // Group membership doesn't apply on the outgoing side — we
+        // filter by `granted_by` directly. Bundle expansion still
+        // happens at read time via `role_row_to_grants` until the
+        // public `Grant` shape becomes role-keyed.
         let rows = sqlx::query_as::<
             _,
             (
@@ -1594,10 +1621,10 @@ impl AuthorizationEngine for PgAclEngine {
         >(
             r#"
             SELECT id, subject_type, subject_id, resource_type, resource_id,
-                   permission, granted_by, granted_at, expires_at
-              FROM storage.access_grants
+                   role::text, granted_by, granted_at, expires_at
+              FROM storage.role_grants
              WHERE granted_by = $1
-             ORDER BY granted_at DESC
+             ORDER BY role ASC, granted_at DESC
             "#,
         )
         .bind(granted_by)
@@ -1608,11 +1635,68 @@ impl AuthorizationEngine for PgAclEngine {
         rows.into_iter().map(Self::row_to_grant).collect()
     }
 
-    async fn grant(
+    async fn set_expiry_for_subject(
+        &self,
+        subject: Subject,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<(), DomainError> {
+        sqlx::query(
+            "UPDATE storage.role_grants SET expires_at = $3 \
+             WHERE subject_type = $1 AND subject_id = $2",
+        )
+        .bind(subject.type_str())
+        .bind(subject.id())
+        .bind(expires_at)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(|e| {
+            DomainError::internal_error("PgAcl", format!("set_expiry_for_subject: {e}"))
+        })?;
+        Ok(())
+    }
+
+    async fn revoke(&self, grant_id: Uuid) -> Result<(), DomainError> {
+        sqlx::query("DELETE FROM storage.role_grants WHERE id = $1")
+            .bind(grant_id)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(|e| DomainError::internal_error("PgAcl", format!("revoke: {e}")))?;
+        Ok(())
+    }
+
+    async fn revoke_all_for_resource(&self, resource: Resource) -> Result<usize, DomainError> {
+        let result = sqlx::query(
+            "DELETE FROM storage.role_grants WHERE resource_type = $1 AND resource_id = $2",
+        )
+        .bind(resource.type_str())
+        .bind(resource.id())
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("PgAcl", format!("revoke for resource: {e}")))?;
+
+        Ok(result.rows_affected() as usize)
+    }
+
+    async fn revoke_all_for_subject(&self, subject: Subject) -> Result<usize, DomainError> {
+        let result = sqlx::query(
+            "DELETE FROM storage.role_grants WHERE subject_type = $1 AND subject_id = $2",
+        )
+        .bind(subject.type_str())
+        .bind(subject.id())
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("PgAcl", format!("revoke for subject: {e}")))?;
+
+        Ok(result.rows_affected() as usize)
+    }
+
+    // ── D-Prep role_grants writes ──────────────────────────────────────────
+
+    async fn set_role(
         &self,
         granted_by: Uuid,
         subject: Subject,
-        permission: Permission,
+        role: Role,
         resource: Resource,
         expires_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Grant, DomainError> {
@@ -1631,148 +1715,16 @@ impl AuthorizationEngine for PgAclEngine {
             ),
         >(
             r#"
-            INSERT INTO storage.access_grants
-                (subject_type, subject_id, resource_type, resource_id, permission, granted_by, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (subject_type, subject_id, resource_type, resource_id, permission)
-            DO UPDATE SET expires_at = EXCLUDED.expires_at
-            RETURNING id, subject_type, subject_id, resource_type, resource_id,
-                      permission, granted_by, granted_at, expires_at
-            "#,
-        )
-        .bind(subject.type_str())
-        .bind(subject.id())
-        .bind(resource.type_str())
-        .bind(resource.id())
-        .bind(permission.as_str())
-        .bind(granted_by)
-        .bind(expires_at)
-        .fetch_one(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("PgAcl", format!("insert grant: {e}")))?;
-
-        Self::row_to_grant(row)
-    }
-
-    async fn set_expiry_for_subject(
-        &self,
-        subject: Subject,
-        expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<(), DomainError> {
-        sqlx::query(
-            "UPDATE storage.access_grants SET expires_at = $3 WHERE subject_type = $1 AND subject_id = $2",
-        )
-        .bind(subject.type_str())
-        .bind(subject.id())
-        .bind(expires_at)
-        .execute(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("PgAcl", format!("set_expiry_for_subject: {e}")))?;
-        Ok(())
-    }
-
-    async fn set_expiry_on_resource(
-        &self,
-        subject: Subject,
-        resource: Resource,
-        expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<(), DomainError> {
-        sqlx::query(
-            "UPDATE storage.access_grants SET expires_at = $3 \
-             WHERE subject_type = $1 AND subject_id = $2 \
-             AND resource_type = $4 AND resource_id = $5",
-        )
-        .bind(subject.type_str())
-        .bind(subject.id())
-        .bind(expires_at)
-        .bind(resource.type_str())
-        .bind(resource.id())
-        .execute(self.pool.as_ref())
-        .await
-        .map_err(|e| {
-            DomainError::internal_error("PgAcl", format!("set_expiry_on_resource: {e}"))
-        })?;
-        Ok(())
-    }
-
-    async fn revoke(&self, grant_id: Uuid) -> Result<(), DomainError> {
-        sqlx::query("DELETE FROM storage.access_grants WHERE id = $1")
-            .bind(grant_id)
-            .execute(self.pool.as_ref())
-            .await
-            .map_err(|e| DomainError::internal_error("PgAcl", format!("revoke: {e}")))?;
-        Ok(())
-    }
-
-    async fn revoke_all_for_resource(&self, resource: Resource) -> Result<usize, DomainError> {
-        // D-Prep dual-write: wipe role_grants for this resource too.
-        // Idempotent — succeeds whether or not any row existed.
-        sqlx::query(
-            "DELETE FROM storage.role_grants WHERE resource_type = $1 AND resource_id = $2",
-        )
-        .bind(resource.type_str())
-        .bind(resource.id())
-        .execute(self.pool.as_ref())
-        .await
-        .map_err(|e| {
-            DomainError::internal_error("PgAcl", format!("revoke role_grants for resource: {e}"))
-        })?;
-
-        let result = sqlx::query(
-            "DELETE FROM storage.access_grants WHERE resource_type = $1 AND resource_id = $2",
-        )
-        .bind(resource.type_str())
-        .bind(resource.id())
-        .execute(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("PgAcl", format!("revoke for resource: {e}")))?;
-
-        Ok(result.rows_affected() as usize)
-    }
-
-    async fn revoke_all_for_subject(&self, subject: Subject) -> Result<usize, DomainError> {
-        // D-Prep dual-write: wipe role_grants for this subject too.
-        sqlx::query("DELETE FROM storage.role_grants WHERE subject_type = $1 AND subject_id = $2")
-            .bind(subject.type_str())
-            .bind(subject.id())
-            .execute(self.pool.as_ref())
-            .await
-            .map_err(|e| {
-                DomainError::internal_error("PgAcl", format!("revoke role_grants for subject: {e}"))
-            })?;
-
-        let result = sqlx::query(
-            "DELETE FROM storage.access_grants WHERE subject_type = $1 AND subject_id = $2",
-        )
-        .bind(subject.type_str())
-        .bind(subject.id())
-        .execute(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("PgAcl", format!("revoke for subject: {e}")))?;
-
-        Ok(result.rows_affected() as usize)
-    }
-
-    // ── D-Prep role_grants writes ──────────────────────────────────────────
-
-    async fn set_role(
-        &self,
-        granted_by: Uuid,
-        subject: Subject,
-        role: crate::application::dtos::grant_dto::Role,
-        resource: Resource,
-        expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<(), DomainError> {
-        sqlx::query(
-            r#"
             INSERT INTO storage.role_grants
                 (subject_type, subject_id, resource_type, resource_id,
                  role, granted_by, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5::storage.grant_role, $6, $7)
             ON CONFLICT (subject_type, subject_id, resource_type, resource_id)
             DO UPDATE SET role       = EXCLUDED.role,
                           expires_at = EXCLUDED.expires_at,
                           granted_by = EXCLUDED.granted_by
+            RETURNING id, subject_type, subject_id, resource_type, resource_id,
+                      role::text, granted_by, granted_at, expires_at
             "#,
         )
         .bind(subject.type_str())
@@ -1782,11 +1734,11 @@ impl AuthorizationEngine for PgAclEngine {
         .bind(role.as_str())
         .bind(granted_by)
         .bind(expires_at)
-        .execute(self.pool.as_ref())
+        .fetch_one(self.pool.as_ref())
         .await
         .map_err(|e| DomainError::internal_error("PgAcl", format!("set_role: {e}")))?;
 
-        Ok(())
+        Self::row_to_grant(row)
     }
 
     async fn clear_role(&self, subject: Subject, resource: Resource) -> Result<(), DomainError> {

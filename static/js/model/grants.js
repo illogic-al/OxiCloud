@@ -164,7 +164,9 @@ const grants = {
 
     /**
      * Create a new grant.
-     * Body mirrors `CreateGrantDto`: `{ subject, resource, role }` OR `{ subject, resource, permissions }`.
+     * Body mirrors `CreateGrantDto`: `{ subject, resource, role, expires_at? }`.
+     * Strictly role-keyed since the cleanup PR — the per-permission shape
+     * is no longer accepted.
      *
      * Response shape (PR N1 — `CreateGrantResponseDto`):
      *
