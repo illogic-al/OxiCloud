@@ -1,0 +1,271 @@
+//! People (faces) use cases: identity clustering + the read/mutation methods
+//! the HTTP layer calls.
+//!
+//! Clustering is a full re-cluster over the user's faces: a union-find groups
+//! faces whose embeddings are within a cosine threshold (connected
+//! components), and groups of at least `min_faces` become a "person". This is
+//! O(n²) in the user's face count — fine for moderate libraries; an ANN index
+//! (pgvector/VectorChord) is the documented scale-up.
+//!
+//! Strictly user-scoped (the repository filters by user), so — like
+//! `RecentService` / `PlacesService` — no `AuthorizationEngine` check is
+//! needed: the `caller_id` parameter is the access scope.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use chrono::Utc;
+use uuid::Uuid;
+
+use crate::application::dtos::people_dto::{FaceBoxDto, PersonDto};
+use crate::application::ports::face_ports::FaceRepository;
+use crate::common::errors::DomainError;
+use crate::domain::entities::face::Person;
+use crate::infrastructure::repositories::pg::FacePgRepository;
+
+/// Cosine similarity of two equal-length vectors. Embeddings are produced
+/// L2-normalized, so this is ~a dot product; we normalize anyway for safety.
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+/// Disjoint-set with path-halving + union by rank.
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+            rank: vec![0; n],
+        }
+    }
+    fn find(&mut self, mut x: usize) -> usize {
+        while self.parent[x] != x {
+            self.parent[x] = self.parent[self.parent[x]];
+            x = self.parent[x];
+        }
+        x
+    }
+    fn union(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra == rb {
+            return;
+        }
+        match self.rank[ra].cmp(&self.rank[rb]) {
+            std::cmp::Ordering::Less => self.parent[ra] = rb,
+            std::cmp::Ordering::Greater => self.parent[rb] = ra,
+            std::cmp::Ordering::Equal => {
+                self.parent[rb] = ra;
+                self.rank[ra] += 1;
+            }
+        }
+    }
+}
+
+pub struct PeopleService {
+    repo: Arc<FacePgRepository>,
+    /// Min cosine similarity to link two faces into the same identity.
+    cluster_threshold: f32,
+    /// Min faces in a cluster before it becomes a named-able "person".
+    min_faces: usize,
+}
+
+impl PeopleService {
+    pub fn new(repo: Arc<FacePgRepository>) -> Self {
+        Self {
+            repo,
+            cluster_threshold: 0.5,
+            min_faces: 3,
+        }
+    }
+
+    /// Re-cluster a user's faces. Returns the number of new persons created.
+    pub async fn recluster(&self, user_id: Uuid) -> Result<usize, DomainError> {
+        let faces = self.repo.faces_for_user(user_id).await?;
+        let n = faces.len();
+        if n == 0 {
+            return Ok(0);
+        }
+
+        let mut uf = UnionFind::new(n);
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if cosine(&faces[i].embedding, &faces[j].embedding) >= self.cluster_threshold {
+                    uf.union(i, j);
+                }
+            }
+        }
+
+        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+        for i in 0..n {
+            let root = uf.find(i);
+            groups.entry(root).or_default().push(i);
+        }
+
+        let mut created = 0usize;
+        for idxs in groups.into_values() {
+            if idxs.len() < self.min_faces {
+                // Too small to be a person — leave/reset these faces unassigned.
+                for &i in &idxs {
+                    if faces[i].person_id.is_some() {
+                        self.repo.assign_person(faces[i].id, None).await?;
+                    }
+                }
+                continue;
+            }
+
+            // Reuse an existing person on this cluster (preserves a user's name)
+            // or mint a new one.
+            let existing = idxs.iter().find_map(|&i| faces[i].person_id);
+            let person_id = match existing {
+                Some(pid) => pid,
+                None => {
+                    let pid = Uuid::new_v4();
+                    let person = Person {
+                        id: pid,
+                        user_id,
+                        display_name: None,
+                        cover_face_id: Some(faces[idxs[0]].id),
+                        is_hidden: false,
+                        created_at: Utc::now(),
+                    };
+                    self.repo.create_person(&person).await?;
+                    created += 1;
+                    pid
+                }
+            };
+            for &i in &idxs {
+                if faces[i].person_id != Some(person_id) {
+                    self.repo
+                        .assign_person(faces[i].id, Some(person_id))
+                        .await?;
+                }
+            }
+            let _ = self
+                .repo
+                .set_person_cover(person_id, faces[idxs[0]].id)
+                .await;
+        }
+
+        Ok(created)
+    }
+
+    /// People (non-empty clusters), most-photographed first.
+    pub async fn list_people(&self, caller_id: Uuid) -> Result<Vec<PersonDto>, DomainError> {
+        let persons = self.repo.persons_for_user(caller_id).await?;
+        let faces = self.repo.faces_for_user(caller_id).await?;
+
+        let mut count: HashMap<Uuid, i64> = HashMap::new();
+        let mut face_file: HashMap<Uuid, Uuid> = HashMap::new();
+        for f in &faces {
+            if let Some(pid) = f.person_id {
+                *count.entry(pid).or_default() += 1;
+            }
+            face_file.insert(f.id, f.file_id);
+        }
+
+        let mut out: Vec<PersonDto> = persons
+            .into_iter()
+            .filter_map(|p| {
+                let c = count.get(&p.id).copied().unwrap_or(0);
+                if c == 0 {
+                    return None; // hide empty clusters (e.g. after a merge)
+                }
+                let cover_file_id = p
+                    .cover_face_id
+                    .and_then(|fid| face_file.get(&fid).copied())
+                    .map(|u| u.to_string());
+                Some(PersonDto {
+                    id: p.id.to_string(),
+                    name: p.display_name,
+                    cover_file_id,
+                    face_count: c,
+                    is_hidden: p.is_hidden,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| b.face_count.cmp(&a.face_count));
+        Ok(out)
+    }
+
+    /// File ids of a person's photos (most recent first).
+    pub async fn person_photos(
+        &self,
+        caller_id: Uuid,
+        person_id: Uuid,
+    ) -> Result<Vec<String>, DomainError> {
+        let files = self.repo.files_for_person(caller_id, person_id).await?;
+        Ok(files.into_iter().map(|u| u.to_string()).collect())
+    }
+
+    /// Face boxes within a photo (for lightbox tagging), caller-scoped.
+    pub async fn faces_for_file(
+        &self,
+        caller_id: Uuid,
+        file_id: Uuid,
+    ) -> Result<Vec<FaceBoxDto>, DomainError> {
+        let faces = self.repo.faces_for_file(file_id).await?;
+        Ok(faces
+            .into_iter()
+            .filter(|f| f.user_id == caller_id)
+            .map(|f| FaceBoxDto {
+                id: f.id.to_string(),
+                person_id: f.person_id.map(|u| u.to_string()),
+                x: f.bbox.x,
+                y: f.bbox.y,
+                w: f.bbox.w,
+                h: f.bbox.h,
+            })
+            .collect())
+    }
+
+    pub async fn rename_person(
+        &self,
+        caller_id: Uuid,
+        person_id: Uuid,
+        name: Option<String>,
+    ) -> Result<(), DomainError> {
+        self.repo.rename_person(caller_id, person_id, name).await
+    }
+
+    pub async fn set_hidden(
+        &self,
+        caller_id: Uuid,
+        person_id: Uuid,
+        hidden: bool,
+    ) -> Result<(), DomainError> {
+        self.repo
+            .set_person_hidden(caller_id, person_id, hidden)
+            .await
+    }
+
+    /// Merge `from` into `into` by reassigning all of `from`'s faces. The
+    /// now-empty `from` person is hidden by `list_people`.
+    pub async fn merge(&self, caller_id: Uuid, into: Uuid, from: Uuid) -> Result<(), DomainError> {
+        let faces = self.repo.faces_for_user(caller_id).await?;
+        for f in faces.into_iter().filter(|f| f.person_id == Some(from)) {
+            self.repo.assign_person(f.id, Some(into)).await?;
+        }
+        Ok(())
+    }
+
+    /// Erase all of the caller's face data (right to erasure / opt-out).
+    pub async fn delete_all(&self, caller_id: Uuid) -> Result<(), DomainError> {
+        self.repo.delete_all_for_user(caller_id).await
+    }
+}
