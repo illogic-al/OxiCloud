@@ -1157,7 +1157,7 @@ impl AppServiceFactory {
             //                                       audit event is recorded
             //                                       even if a later hook
             //                                       errors out.
-            //   2. HomeFolderLifecycleHook        — provisions the user's
+            //   2. PersonalDriveLifecycleHook        — provisions the user's
             //                                       home folder on
             //                                       created/login (no-op
             //                                       for external users).
@@ -1235,7 +1235,7 @@ impl AppServiceFactory {
 
             // Auth services. Folder service no longer threaded here —
             // PR 3 moved home-folder provisioning into
-            // HomeFolderLifecycleHook, which already holds an Arc to the
+            // PersonalDriveLifecycleHook, which already holds an Arc to the
             // folder service via the user_lifecycle dispatcher.
             if self.config.features.enable_auth {
                 let services = crate::infrastructure::auth_factory::create_auth_services(

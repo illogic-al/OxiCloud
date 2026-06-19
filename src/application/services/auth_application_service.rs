@@ -124,7 +124,7 @@ pub struct AuthApplicationService {
     token_service: Arc<JwtTokenService>,
     /// Dispatcher for user-lifecycle events. `None` only in tests that don't
     /// exercise the lifecycle path; production DI always wires this.
-    /// HomeFolderLifecycleHook (registered on this dispatcher) owns the
+    /// PersonalDriveLifecycleHook (registered on this dispatcher) owns the
     /// per-user folder provisioning that AuthApplicationService used to do
     /// inline pre-PR 3.
     user_lifecycle: Option<Arc<UserLifecycleService>>,
@@ -404,7 +404,7 @@ impl AuthApplicationService {
         // Save user
         let created_user = self.user_storage.create_user(user).await?;
 
-        // Lifecycle: HomeFolderLifecycleHook handles personal-folder
+        // Lifecycle: PersonalDriveLifecycleHook handles personal-folder
         // creation (was inlined here pre-PR 3); audit log + future
         // provisioning steps land here too.
         if let Some(lc) = &self.user_lifecycle {
@@ -506,8 +506,8 @@ impl AuthApplicationService {
         let created_user = self.user_storage.create_user(user).await?;
 
         // Lifecycle: notify hooks. PR 3 moves home-folder creation into
-        // HomeFolderLifecycleHook fired here.
-        // Lifecycle: HomeFolderLifecycleHook provisions the admin's
+        // PersonalDriveLifecycleHook fired here.
+        // Lifecycle: PersonalDriveLifecycleHook provisions the admin's
         // home folder. Audit logs the creation event.
         if let Some(lc) = &self.user_lifecycle {
             lc.dispatch_created(&created_user).await;
@@ -654,7 +654,7 @@ impl AuthApplicationService {
     ///    A second redemption attempt receives `Ok(false)` and is rejected
     ///    as `AccessDenied`.
     /// 3. Load the user, verify they're active.
-    /// 4. Dispatch `on_user_login` (so HomeFolderLifecycleHook can
+    /// 4. Dispatch `on_user_login` (so PersonalDriveLifecycleHook can
     ///    safety-net any internal user whose first credential happens
     ///    to be a magic link — externals short-circuit by `is_external()`).
     /// 5. Register login + persist + issue session in the same pipeline
@@ -1722,7 +1722,7 @@ impl AuthApplicationService {
                 .await?;
         }
 
-        // Lifecycle: HomeFolderLifecycleHook handles the home-folder
+        // Lifecycle: PersonalDriveLifecycleHook handles the home-folder
         // provisioning (idempotent + short-circuits on is_external).
         // Audit logs the creation event.
         if let Some(lc) = &self.user_lifecycle {
@@ -1785,7 +1785,7 @@ impl AuthApplicationService {
     /// Runs the whole flow in a single transaction so the lifecycle
     /// hooks (`SessionRevocationLifecycleHook` revoking sessions with
     /// audit, `AuthzCacheLifecycleHook` invalidating the Moka cache,
-    /// `HomeFolderLifecycleHook` for future trash policy, …) can do
+    /// `PersonalDriveLifecycleHook` for future trash policy, …) can do
     /// their work atomically with the user DELETE. If any hook returns
     /// `Err`, the transaction rolls back and the user remains intact.
     pub async fn delete_user_admin(&self, user_id: Uuid) -> Result<(), DomainError> {
@@ -2260,7 +2260,7 @@ impl AuthApplicationService {
                 // Lifecycle: created (audit + home-folder provisioning) +
                 // login (no register_login() for a fresh OIDC user means
                 // `last_login_at` is naturally None → first-login detection
-                // works). HomeFolderLifecycleHook creates the home folder.
+                // works). PersonalDriveLifecycleHook creates the home folder.
                 if let Some(lc) = &self.user_lifecycle {
                     lc.dispatch_created(&created_user).await;
                     lc.dispatch_login(&created_user).await;
@@ -2362,7 +2362,7 @@ impl AuthApplicationService {
 
     // `create_personal_folder` was removed in PR 3 of the
     // UserLifecycleHook migration — home-folder provisioning is now
-    // owned by `HomeFolderLifecycleHook` in folder_service.rs and runs
+    // owned by `PersonalDriveLifecycleHook` in folder_service.rs and runs
     // via `dispatch_created` / `dispatch_login`.
 }
 

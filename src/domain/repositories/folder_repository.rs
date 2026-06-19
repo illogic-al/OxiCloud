@@ -136,18 +136,6 @@ pub trait FolderRepository: Send + Sync + 'static {
     /// Permanently deletes a folder (used by the trash)
     async fn delete_folder_permanently(&self, folder_id: &str) -> Result<(), DomainError>;
 
-    /// Creates a root-level home folder for a user inside their personal drive.
-    /// Called during user registration / first login to maintain the wrapper-
-    /// folder convention through the D0 dual-write window (the wrapper itself
-    /// retires in a follow-up migration; for now it stays as a real folder
-    /// row stamped with `drive_id`).
-    async fn create_home_folder(
-        &self,
-        user_id: Uuid,
-        drive_id: Uuid,
-        name: String,
-    ) -> Result<Folder, DomainError>;
-
     /// Lists every folder in a subtree rooted at `folder_id` (inclusive).
     ///
     /// Uses ltree `<@` for a single GiST-indexed scan.  The result is

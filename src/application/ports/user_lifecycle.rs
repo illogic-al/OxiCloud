@@ -127,7 +127,7 @@ pub enum LogoutReason {
 
 /// How aggressively `on_user_deleted` cleanup should run. Today both
 /// variants are equivalent (only `AuditLifecycleHook` exists, and it logs
-/// regardless). The split exists so PR 4's `HomeFolderLifecycleHook` can
+/// regardless). The split exists so PR 4's `PersonalDriveLifecycleHook` can
 /// trash on `AdminDelete` but hard-delete on `GdprPurge`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeletionMode {

@@ -47,7 +47,7 @@ pub async fn create_auth_services(
     );
 
     // Wire the user-lifecycle dispatcher. Home-folder provisioning is
-    // now handled by HomeFolderLifecycleHook (registered on the
+    // now handled by PersonalDriveLifecycleHook (registered on the
     // dispatcher in DI) — AuthApplicationService no longer needs a
     // direct FolderService dependency for that path.
     auth_app_service = auth_app_service.with_user_lifecycle(user_lifecycle);

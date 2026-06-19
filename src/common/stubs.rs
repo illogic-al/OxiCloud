@@ -353,15 +353,6 @@ impl FolderRepository for StubFolderStoragePort {
     async fn delete_folder_permanently(&self, _folder_id: &str) -> Result<(), DomainError> {
         Ok(())
     }
-
-    async fn create_home_folder(
-        &self,
-        _user_id: Uuid,
-        _drive_id: Uuid,
-        _name: String,
-    ) -> Result<Folder, DomainError> {
-        Ok(Folder::default())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -494,15 +485,6 @@ impl FolderUseCase for StubFolderUseCase {
         _caller_id: Uuid,
     ) -> Result<(), DomainError> {
         Ok(())
-    }
-
-    async fn create_home_folder(
-        &self,
-        _user_id: Uuid,
-        _drive_id: Uuid,
-        _name: String,
-    ) -> Result<FolderDto, DomainError> {
-        Ok(FolderDto::default())
     }
 }
 

@@ -167,15 +167,6 @@ impl FolderService {
             ) -> Result<(), DomainError> {
                 Ok(())
             }
-
-            async fn create_home_folder(
-                &self,
-                _user_id: Uuid,
-                _drive_id: Uuid,
-                _name: String,
-            ) -> Result<FolderDto, DomainError> {
-                Ok(FolderDto::empty())
-            }
         }
 
         FolderServiceStub
@@ -236,30 +227,6 @@ impl FolderUseCase for FolderService {
             .folder_storage
             .create_folder(dto.name, dto.parent_id, caller_id)
             .await?;
-        Ok(FolderDto::from(folder))
-    }
-
-    /// Creates a root-level home folder for a user during registration.
-    /// `drive_id` is the user's personal drive — the wrapper folder lives
-    /// inside it during the D0 dual-write window (M2b retires the wrapper
-    /// later).
-    async fn create_home_folder(
-        &self,
-        user_id: Uuid,
-        drive_id: Uuid,
-        name: String,
-    ) -> Result<FolderDto, DomainError> {
-        let folder = self
-            .folder_storage
-            .create_home_folder(user_id, drive_id, name)
-            .await
-            .map_err(|e| {
-                DomainError::internal_error(
-                    "FolderStorage",
-                    format!("Failed to create home folder: {}", e),
-                )
-            })?;
-
         Ok(FolderDto::from(folder))
     }
 
@@ -341,7 +308,7 @@ impl FolderUseCase for FolderService {
     ///
     /// **Note (post PR 3):** the self-heal block that auto-created a
     /// home folder when listing returned empty has been removed.
-    /// `HomeFolderLifecycleHook` (registered on `UserLifecycleService`)
+    /// `PersonalDriveLifecycleHook` (registered on `UserLifecycleService`)
     /// now provisions the folder on `on_user_created` / `on_user_login`,
     /// idempotently, so the listing path no longer needs to self-heal.
     async fn list_folders_with_perms(
@@ -626,63 +593,6 @@ impl FolderService {
 
         Ok((rows, next_cursor))
     }
-
-    /// Idempotently provision a home folder for a user.
-    ///
-    /// Returns `Ok(true)` if a folder was newly created, `Ok(false)` if the
-    /// user already had at least one root folder.
-    ///
-    /// **System-level operation** — bypasses authz because this runs on
-    /// the user's own behalf (during creation or login provisioning) at a
-    /// point where the caller may be the engine itself, not an HTTP user.
-    /// Callers must be inside trusted code paths (lifecycle hooks).
-    ///
-    /// Used by [`HomeFolderLifecycleHook`] on `on_user_created` and
-    /// `on_user_login`. Replaces the old self-heal at the listing path
-    /// and the four eager `create_personal_folder` calls in
-    /// `AuthApplicationService` (removed in the same PR).
-    pub async fn ensure_home_folder(
-        &self,
-        user_id: Uuid,
-        drive_id: Uuid,
-        username: Option<&str>,
-    ) -> Result<bool, DomainError> {
-        let existing = self
-            .folder_storage
-            .list_folders_by_owner(None, user_id)
-            .await
-            .map_err(|e| {
-                DomainError::internal_error(
-                    "FolderStorage",
-                    format!("ensure_home_folder: list root folders: {}", e),
-                )
-            })?;
-        if !existing.is_empty() {
-            return Ok(false);
-        }
-
-        let folder_name = match username {
-            Some(u) => format!("My Folder - {}", u),
-            None => format!("My Folder - {}", user_id),
-        };
-        self.folder_storage
-            .create_home_folder(user_id, drive_id, folder_name.clone())
-            .await
-            .map_err(|e| {
-                DomainError::internal_error(
-                    "FolderStorage",
-                    format!("ensure_home_folder: create: {}", e),
-                )
-            })?;
-        tracing::info!(
-            target: "user_lifecycle",
-            hook = "home_folder",
-            user_id = %user_id,
-            folder_name = %folder_name,
-            "Home folder provisioned"
-        );
-        Ok(true)
-    }
 }
 
 /// Build the next-page cursor from the last row of the current page.
@@ -738,7 +648,7 @@ fn build_folder_resource_cursor(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HomeFolderLifecycleHook
+// PersonalDriveLifecycleHook
 //
 // Owns home-folder provisioning policy. Replaces:
 //   - the 4 eager `create_personal_folder` calls in AuthApplicationService

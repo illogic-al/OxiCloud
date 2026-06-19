@@ -132,7 +132,7 @@ impl UserLifecycleService {
 //
 // Always-on observer. Emits one structured `tracing::info!(target: "audit",
 // ...)` line per event. The only hook registered in PR 1; subsequent PRs
-// add HomeFolderLifecycleHook, AuthzCacheLifecycleHook, etc., each living
+// add PersonalDriveLifecycleHook, AuthzCacheLifecycleHook, etc., each living
 // next to the service it works for.
 // ─────────────────────────────────────────────────────────────────────────────
 

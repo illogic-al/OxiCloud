@@ -29,26 +29,11 @@ struct DrivePickerTemplate {
     drives: Vec<DriveOption>,
 }
 
-/// Find the index of the user's home folder inside `drives`.
-///
-/// Convention: home is the root folder named `"My Folder - {username}"`,
-/// set by `FolderService::ensure_home_folder` at registration. Extra
-/// root folders (POC drive seeding via direct SQL insert) don't follow
-/// this name, so the pattern disambiguates home from sibling drives.
-/// Returns `None` if no folder matches — caller decides whether that
-/// is fatal or just "treat everything as a non-home drive".
-///
-/// Mirrors the same lookup performed in `routes.rs::
-/// verify_url_user_and_resolve_chroot` (legacy no-`~` path); both
-/// sites must agree on which row is home or the URL and the auth
-/// marker will diverge.
-fn find_home_index(
-    drives: &[crate::application::dtos::folder_dto::FolderDto],
-    username: &str,
-) -> Option<usize> {
-    let expected = format!("My Folder - {}", username);
-    drives.iter().position(|f| f.name == expected)
-}
+// Home identification is via `position_of_user_home_root_folder` from
+// `domain::repositories::drive_repository` — a generic helper that
+// keys off `drives.default_for_user == user_id` rather than folder
+// name, so user renames of the home folder don't silently break the
+// picker UX.
 
 /// Serve an HTML page with a Content-Security-Policy header as defense-in-depth.
 fn html_with_csp(html: &'static str) -> Response {
@@ -242,7 +227,14 @@ pub async fn handle_login_submit(
         // `loop.first`, so placing home first is the single point
         // that makes the picker UI line up with the home convention.
         // Other drives keep their original alphabetical order.
-        if let Some(idx) = find_home_index(&drives, &current_user.username)
+        if let Some(idx) =
+            crate::domain::repositories::drive_repository::position_of_user_home_root_folder(
+                state.drive_repo.as_ref(),
+                current_user.id,
+                &drives,
+                |f| uuid::Uuid::parse_str(&f.id).ok(),
+            )
+            .await
             && idx != 0
         {
             let home = drives.remove(idx);
@@ -478,7 +470,14 @@ pub async fn handle_drive_pick(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let home_id = find_home_index(&drives, &user.username).map(|i| drives[i].id.as_str());
+    let home_id = crate::domain::repositories::drive_repository::position_of_user_home_root_folder(
+        state.drive_repo.as_ref(),
+        user.id,
+        &drives,
+        |f| uuid::Uuid::parse_str(&f.id).ok(),
+    )
+    .await
+    .map(|i| drives[i].id.as_str());
     let is_home = home_id == Some(drive_id.as_str());
     let drive_marker = if is_home {
         None

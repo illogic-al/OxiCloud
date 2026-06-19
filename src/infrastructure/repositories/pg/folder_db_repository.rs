@@ -198,7 +198,10 @@ impl FolderRepository for FolderDbRepository {
         } else {
             return Err(DomainError::internal_error(
                 "FolderDb",
-                "Cannot create root folder without user_id — use create_home_folder instead",
+                "Cannot create root folder — root folders are reserved for the \
+                 atomic drive-creation transaction in DrivePgRepository::\
+                 create_personal_drive_atomic (docs/plan/drive.md §3). The \
+                 no-orphan-root-folder trigger enforces this at the DB level.",
             ));
         };
 
@@ -942,95 +945,6 @@ impl FolderRepository for FolderDbRepository {
             return Err(DomainError::not_found("Folder", folder_id));
         }
         Ok(())
-    }
-
-    async fn create_home_folder(
-        &self,
-        user_id: Uuid,
-        drive_id: Uuid,
-        name: String,
-    ) -> Result<Folder, DomainError> {
-        // D0-9 keeps the wrapper-folder convention through the dual-write
-        // window: the lifecycle hook creates the personal drive AND a
-        // root folder under it. Wrapper retirement (the `My Folder -
-        // <username>/` prefix and the wrapper row itself) lands in M2b
-        // alongside the path rewrite. drive_id is required (M3 NOT NULL);
-        // created_by/updated_by are stamped from user_id for D0
-        // provenance.
-        let row = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
-            r#"
-            INSERT INTO storage.folders
-                (name, parent_id, user_id, drive_id, created_by, updated_by)
-            VALUES ($1, NULL, $2, $3, $2, $2)
-            ON CONFLICT DO NOTHING
-            RETURNING id::text,
-                      path,
-                      EXTRACT(EPOCH FROM created_at)::bigint,
-                      EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint
-            "#,
-        )
-        .bind(&name)
-        .bind(user_id)
-        .bind(drive_id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(|e| DomainError::internal_error("FolderDb", format!("home folder: {e}")))?;
-
-        match row {
-            Some((id, path, ca, ma, tma)) => Self::row_to_folder(
-                id,
-                name.clone(),
-                path,
-                None,
-                Some(user_id),
-                drive_id,
-                ca,
-                ma,
-                tma,
-                // INSERT stamped both provenance columns from user_id
-                // (D0 dual-write); D2 will plumb the real caller_id.
-                Some(user_id),
-                Some(user_id),
-            ),
-            None => {
-                // Already exists — fetch it. SELECT also pulls the §14
-                // provenance columns so the entity layer reflects DB truth.
-                let existing = sqlx::query_as::<
-                    _,
-                    (String, String, i64, i64, i64, Option<Uuid>, Option<Uuid>),
-                >(
-                    r#"
-                    SELECT id::text,
-                           path,
-                           EXTRACT(EPOCH FROM created_at)::bigint,
-                           EXTRACT(EPOCH FROM updated_at)::bigint,
-                           EXTRACT(EPOCH FROM tree_modified_at)::bigint,
-                           created_by, updated_by
-                      FROM storage.folders
-                     WHERE name = $1 AND user_id = $2 AND parent_id IS NULL
-                    "#,
-                )
-                .bind(&name)
-                .bind(user_id)
-                .fetch_one(self.pool())
-                .await
-                .map_err(|e| DomainError::internal_error("FolderDb", format!("home fetch: {e}")))?;
-                Self::row_to_folder(
-                    existing.0,
-                    name,
-                    existing.1,
-                    None,
-                    Some(user_id),
-                    drive_id,
-                    existing.2,
-                    existing.3,
-                    existing.4,
-                    existing.5,
-                    existing.6,
-                )
-            }
-        }
     }
 
     /// Lists every folder in a subtree rooted at `folder_id` (inclusive).

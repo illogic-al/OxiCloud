@@ -96,16 +96,6 @@ pub trait FolderUseCase: Send + Sync + 'static {
     /// Deletes a folder (ownership verified against caller_id)
     async fn delete_folder_with_perms(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError>;
 
-    /// Creates a root-level home folder for a user during registration.
-    /// `drive_id` is the user's personal drive; the wrapper folder stays
-    /// during the D0 dual-write window (retires in M2b later).
-    async fn create_home_folder(
-        &self,
-        user_id: Uuid,
-        drive_id: Uuid,
-        name: String,
-    ) -> Result<FolderDto, DomainError>;
-
     /// Lists every folder in a subtree rooted at `folder_id` (inclusive),
     /// ordered by path.  Uses ltree `<@` — single GiST-indexed query.
     ///

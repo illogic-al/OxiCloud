@@ -210,7 +210,7 @@ External users have no calendar, no address book, no home folder, and (by design
 6. **`POST /api/auth/app-passwords` is closed.** App passwords are persistent credentials; the magic-link-eligibility rule (`has_login_credential`) assumes externals have **no other credential configured**. Letting an external mint an app password would break that invariant and would also be the only way to authenticate them on the NC surface. 403 + audit on rejection.
 7. **`GET /api/groups/search` is closed.** Group names aren't strictly secret, but externals have no legitimate use for the share-dialog autocomplete (they can't be added to groups anyway).
 
-Pre-existing safeguards from the user-lifecycle work continue to apply: the DB CHECK constraints `users_external_not_admin` and `users_external_no_storage`, and the `HomeFolderLifecycleHook` short-circuit that skips home-folder provisioning for externals.
+Pre-existing safeguards from the user-lifecycle work continue to apply: the DB CHECK constraints `users_external_not_admin` and `users_external_no_storage`, and the `PersonalDriveLifecycleHook` short-circuit that skips drive provisioning for externals (they get no default drive, so `DriveRepository::home_root_folder_id_for(external_user_id)` returns `Ok(None)`).
 
 ### Why protocol-level instead of handler-level
 

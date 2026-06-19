@@ -77,8 +77,7 @@ The asymmetry is deliberate. `on_user_created` and `on_user_login` must complete
                                    │
                   ┌────────────────┼────────────────┐
                   ▼                ▼                ▼
-         AuditLifecycleHook  HomeFolderHook  AuthzCacheHook   …
-            (PR 1 only)        (PR 3)           (PR 4)
+         AuditLifecycleHook  PersonalDriveHook  AuthzCacheHook   …
 ```
 
 ## Owner-located convention
@@ -87,7 +86,7 @@ Each concrete hook impl lives **next to the service that owns the work**, not in
 
 Examples (PR plan):
 
-- `HomeFolderLifecycleHook` lives in `src/application/services/folder_service.rs` — same module as `FolderService`, owner of home-folder policy.
+- `PersonalDriveLifecycleHook` lives in `src/application/services/folder_service.rs` — same module as `FolderService`, owner of home-drive provisioning policy. It calls `DrivePgRepository::create_personal_drive_atomic` to create the drive + root folder + Owner role-grant in one atomic transaction (see [docs/plan/drive.md §3](https://github.com/EdouardVanbelle/OxiCloud/blob/main/docs/plan/drive.md)).
 - `AuthzCacheLifecycleHook` lives in `src/infrastructure/services/pg_acl_engine.rs` — same module as the Moka cache it invalidates.
 - `AuditLifecycleHook` lives in `src/application/services/user_lifecycle_service.rs` (with the dispatcher) — cross-cutting, no domain owner.
 
@@ -120,7 +119,7 @@ These are codified in the module-level docstring of `application/ports/user_life
 | Hook | Lives in | Responsibility |
 |---|---|---|
 | `AuditLifecycleHook` | `src/application/services/user_lifecycle_service.rs` (co-located with dispatcher) | All four events: emits one `tracing::info!(target: "audit", event = "user.*", ...)` per call, with `is_external` as a field. Co-located because audit is cross-cutting with no domain owner. |
-| `HomeFolderLifecycleHook` | `src/application/services/folder_service.rs` (same module as `FolderService`) | `on_user_created` + `on_user_login`: idempotently provision "My Folder - {username}" via `FolderService::ensure_home_folder`. Short-circuits when `user.is_external()`. `on_user_logout`: `Ok(())`. `on_user_deleted`: per-mode `tracing::info!` event so audit distinguishes AdminDelete from GdprPurge — the FK CASCADE on `storage.folders.user_id` handles the actual row removal. Trash-with-retention is documented as future work. |
+| `PersonalDriveLifecycleHook` | `src/application/services/folder_service.rs` (same module as `FolderService`) | `on_user_created` + `on_user_login`: idempotently provision the user's **default personal drive** + its root folder + Owner role-grant via `DrivePgRepository::create_personal_drive_atomic` — all four DB writes in one transaction (drive INSERT, folder INSERT, `drives.root_folder_id` UPDATE, `role_grants` INSERT). Idempotency: `find_default_for_user` short-circuits if the user already has a drive. Short-circuits when `user.is_external()`. `on_user_logout`: `Ok(())`. `on_user_deleted`: per-mode `tracing::info!` event so audit distinguishes AdminDelete from GdprPurge — the FK CASCADE on `storage.drives.default_for_user` handles the actual drive row removal, which cascades to folders/files via their `drive_id` FK. Trash-with-retention is documented as future work. |
 | `AuthzCacheLifecycleHook` | `src/infrastructure/services/pg_acl_engine.rs` (same module as the Moka cache it invalidates) | `on_user_logout` + `on_user_deleted`: `engine.invalidate_user_groups_cache(user.id())` — drops the cached transitive-group expansion immediately so a re-login (or a re-created account with the same id) sees fresh memberships without waiting for the 30 s TTL. `on_user_created` + `on_user_login`: `Ok(())` (no stale entry could exist for these). |
 | `SessionRevocationLifecycleHook` | `src/application/services/user_lifecycle_service.rs` (co-located with dispatcher; no dedicated session service module today) | `on_user_deleted`: explicit `session_storage.revoke_all_user_sessions(user.id())` + aggregate audit event (`event = "user.sessions_revoked_on_delete", count = N`). Replaces the silent FK CASCADE with an observable revocation. All other events: `Ok(())`. |
 | `DeletionMode` | enum on the trait | Distinguishes admin-initiated delete (`AdminDelete` — currently identical to GDPR but reserved for a future trash-with-retention policy) from GDPR right-to-erasure purge (`GdprPurge` — for a future sweeper). PR 4 ships the variants; future PRs may add per-mode behaviour. |
@@ -138,7 +137,7 @@ BEGIN
 dispatch_deleted(user, AdminDelete, &mut tx)
     │
     ├── AuditLifecycleHook        → tracing::info!(event="user.deleted", mode=...)
-    ├── HomeFolderLifecycleHook   → tracing::info!("home folder will be removed via FK CASCADE")
+    ├── PersonalDriveLifecycleHook → tracing::info!("default drive + its tree will be removed via FK CASCADE on storage.drives.default_for_user")
     ├── AuthzCacheLifecycleHook   → engine.invalidate_user_groups_cache(user_id)
     └── SessionRevocationLifecycleHook
                                   → session_storage.revoke_all_user_sessions(user_id)
@@ -163,13 +162,35 @@ If any hook returns `Err`, the dispatcher propagates it; `delete_user_admin` rol
 2. `AuthApplicationService::login()` validates the password against the stored Argon2 hash.
 3. **Before** `user.register_login()` is called, the dispatcher fires `dispatch_login(&user)`. The user's `last_login_at` is still `None` from creation time.
 4. `AuditLifecycleHook::on_user_login` runs first (registration order): emits `event = "user.login", user_id = ..., username = ..., is_external = false, first_login = true`.
-5. `HomeFolderLifecycleHook::on_user_login` runs next: sees `!user.is_external()`, calls `FolderService::ensure_home_folder(uid, username)`. The service checks `list_folders_by_owner(None, uid)` — empty → creates `"My Folder - alice"`. Returns `Ok(true)` (newly created).
+5. `PersonalDriveLifecycleHook::on_user_login` runs next: sees `!user.is_external()`, calls `provision_if_needed`. The hook asks `DriveRepository::find_default_for_user(uid)` — returns `NotFound`. It then calls `DrivePgRepository::create_personal_drive_atomic(uid, quota)` which runs the four-write transaction: INSERT drive, INSERT folder, UPDATE `drives.root_folder_id`, INSERT `role_grants` row. All four commit together.
 6. Dispatcher finishes. `user.register_login()` is now called, stamping `last_login_at` to the current time.
 7. The session row is INSERTed; access + refresh tokens generated; response returned to the client.
 
-On the user's **second** login: same flow up through step 5, but `ensure_home_folder` finds the existing folder, returns `Ok(false)`, no-op. The `AuditLifecycleHook` still emits an event, but `first_login = false` this time.
+On the user's **second** login: same flow up through step 5, but `find_default_for_user` returns `Ok(drive)` (the drive already exists). The hook re-emits the Owner `role_grant` via `set_role` (UPSERT-safe) as belt-and-suspenders against partial provisioning and returns. The `AuditLifecycleHook` still emits an event, but `first_login = false` this time.
 
-If the home folder gets deleted manually (e.g., SQL `DELETE FROM storage.folders WHERE user_id = $1`), the user's **next** login will re-create it — that's the safety-net behaviour the lifecycle hook contractually owns.
+If the drive gets deleted manually (e.g., SQL `DELETE FROM storage.drives WHERE default_for_user = $1`), the user's **next** login will re-create it — that's the safety-net behaviour the lifecycle hook contractually owns. The atomic four-write transaction ensures no partial state can leak through a half-deleted drive.
+
+### Identifying the home — never by name
+
+Code that needs to ask "is this the user's home?" must compare ids, not names. Users rename their home folder. Secondary personal drives keep their original sibling-root names. The single source of truth is **drive ownership**: the drive where `default_for_user = user_id` owns the user's home root folder via `root_folder_id`.
+
+Two helpers in `src/domain/repositories/drive_repository.rs` encapsulate the lookup:
+
+```rust
+// "Give me this user's home root folder id (or None for external)."
+drive_repo.home_root_folder_id_for(user_id).await
+    // → Result<Option<Uuid>, DriveRepositoryError>
+
+// "Where in this list of items is the user's home?" — generic over
+// the item shape; the caller passes an id-extractor closure.
+position_of_user_home_root_folder(
+    drive_repo, user_id, &items,
+    |item| Uuid::parse_str(&item.id).ok(),
+).await
+    // → Option<usize>
+```
+
+`home_root_folder_id_for` returns `Ok(None)` (not an error) for external users — they have no default drive. The position helper is a free function (not a trait method) so `DriveRepository` stays `dyn`-compatible. Use these everywhere; do not write new code that pattern-matches folder names like `"Personal"` or `"My Folder - <user>"`.
 
 ### State of the art:
 
@@ -177,7 +198,7 @@ If the home folder gets deleted manually (e.g., SQL `DELETE FROM storage.folders
   DI builds:
     UserLifecycleService
       ├── AuditLifecycleHook              (in user_lifecycle_service.rs)
-      ├── HomeFolderLifecycleHook         (in folder_service.rs)
+      ├── PersonalDriveLifecycleHook         (in folder_service.rs)
       ├── AuthzCacheLifecycleHook         (in pg_acl_engine.rs)
       ├── SessionRevocationLifecycleHook  (in user_lifecycle_service.rs)
       └── ExternalIdentityLifecycleHook   (in external_identity_service.rs, stubbed)
