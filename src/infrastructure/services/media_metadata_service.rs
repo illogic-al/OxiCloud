@@ -12,9 +12,11 @@
 //! Tokio workers (`spawn_blocking`), and is dedup/copy aware.
 //!
 //! - **Images** — rich EXIF via the existing [`ExifService`] (kamadak-exif:
-//!   GPS, camera, orientation, dimensions, capture date). The capture date is
-//!   then upgraded to a timezone-correct value via `nom-exif`, which parses
-//!   `OffsetTimeOriginal` (falling back to the kamadak naive value).
+//!   GPS, camera, orientation, dimensions, capture date), merged with `nom-exif`
+//!   which (a) upgrades the capture date to a timezone-correct value
+//!   (`OffsetTimeOriginal`) and (b) recovers the date + GPS from files kamadak
+//!   rejects entirely with `InvalidFormat("Unexpected next IFD")` — common in
+//!   phone/edited photos — where the GPS would otherwise be silently dropped.
 //! - **Videos** — container creation time (`mov`/`mp4`/`mkv`) via `nom-exif`,
 //!   which seeks the metadata atoms (never loads the whole file) and is
 //!   timezone-aware. No EXIF exists for video.
@@ -96,28 +98,17 @@ impl MediaMetadataService {
         if Self::is_image_file(mime_type) {
             // Rich EXIF (GPS / camera / orientation / dimensions + naive date)
             // from the proven kamadak extractor.
-            let mut meta = std::fs::read(path)
+            let kamadak = std::fs::read(path)
                 .ok()
                 .and_then(|b| ExifService::extract(&b));
-            // Upgrade the capture date to a timezone-correct instant when the
-            // image carries OffsetTimeOriginal (nom-exif). Falls back to the
-            // kamadak naive value otherwise.
-            let tz_date = capture_date(path);
-            match (meta.as_mut(), tz_date) {
-                (Some(m), Some(dt)) => m.captured_at = Some(dt),
-                (Some(_), None) => { /* keep kamadak's naive captured_at */ }
-                (None, Some(dt)) => {
-                    meta = Some(ExifMetadata {
-                        captured_at: Some(dt),
-                        ..Default::default()
-                    });
-                }
-                (None, None) => {}
-            }
-            meta
+            // nom-exif complements kamadak: a timezone-correct capture date and,
+            // crucially, the date + GPS for files kamadak rejects outright
+            // ("Unexpected next IFD"), where `kamadak` is None and the GPS would
+            // otherwise be lost. See `merge_image_metadata`.
+            merge_image_metadata(kamadak, read_nom_exif(path))
         } else if Self::is_video_file(mime_type) {
             // Videos carry no EXIF — pull the container creation time only.
-            capture_date(path).map(|dt| ExifMetadata {
+            read_nom_exif(path).captured_at.map(|dt| ExifMetadata {
                 captured_at: Some(dt),
                 ..Default::default()
             })
@@ -362,40 +353,97 @@ impl MediaMetadataService {
     }
 }
 
-/// Extract a timezone-correct capture instant from an image (EXIF
-/// `DateTimeOriginal`/`CreateDate`) or video/audio container (`CreateDate`).
+/// Capture date + GPS extracted via `nom-exif`.
+///
+/// `nom-exif` is far more lenient than kamadak-exif, which rejects many
+/// real-world EXIF blocks with `InvalidFormat("Unexpected next IFD")` (phones,
+/// photo editors, anything carrying a non-standard trailing IFD) and then
+/// yields nothing — silently dropping GPS. Reading the date + GPS here lets
+/// [`merge_image_metadata`] recover both even when kamadak fails entirely.
+#[derive(Debug, Default)]
+struct NomExif {
+    captured_at: Option<DateTime<Utc>>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+}
+
+/// Read a timezone-correct capture instant + GPS from an image's EXIF
+/// (`DateTimeOriginal`/`CreateDate` + GPSInfo), or a video/audio container's
+/// creation time (`CreateDate`, no GPS). Missing pieces stay `None`.
 ///
 /// `nom-exif` returns an offset-aware `DateTime<FixedOffset>` when the file
-/// carries `OffsetTimeOriginal` (or a tz-aware container time); when it does
-/// not, the naive wall-clock is interpreted as UTC. Either way the result is
-/// converted to a true UTC instant. Returns `None` if no capture date exists.
-fn capture_date(path: &Path) -> Option<DateTime<Utc>> {
+/// carries `OffsetTimeOriginal` (or a tz-aware container time); otherwise the
+/// naive wall-clock is interpreted as UTC. Either way it is converted to a true
+/// UTC instant. GPS is returned as signed decimal degrees.
+fn read_nom_exif(path: &Path) -> NomExif {
     use nom_exif::{EntryValue, ExifTag, TrackInfoTag, read_exif, read_track};
 
+    // Captures nothing → `Copy`, so it can be reused across the calls below.
     let to_utc = |ev: &EntryValue| -> Option<DateTime<Utc>> {
         let edt = ev.as_datetime()?;
         let utc0 = FixedOffset::east_opt(0)?;
         Some(edt.or_offset(utc0).with_timezone(&Utc))
     };
 
-    // Images: EXIF DateTimeOriginal, then DateTimeDigitized (CreateDate).
+    let mut out = NomExif::default();
+
+    // Images: EXIF DateTimeOriginal → DateTimeDigitized (CreateDate), plus GPS.
     if let Ok(exif) = read_exif(path) {
-        if let Some(dt) = exif.get(ExifTag::DateTimeOriginal).and_then(to_utc) {
-            return Some(dt);
-        }
-        if let Some(dt) = exif.get(ExifTag::CreateDate).and_then(to_utc) {
-            return Some(dt);
+        out.captured_at = exif
+            .get(ExifTag::DateTimeOriginal)
+            .and_then(to_utc)
+            .or_else(|| exif.get(ExifTag::CreateDate).and_then(to_utc));
+        if let Some(gps) = exif.gps_info() {
+            out.latitude = gps.latitude_decimal();
+            out.longitude = gps.longitude_decimal();
         }
     }
 
     // Videos / audio containers (mov/mp4/mkv): track creation time.
-    if let Ok(track) = read_track(path)
+    if out.captured_at.is_none()
+        && let Ok(track) = read_track(path)
         && let Some(dt) = track.get(TrackInfoTag::CreateDate).and_then(to_utc)
     {
-        return Some(dt);
+        out.captured_at = Some(dt);
     }
 
-    None
+    out
+}
+
+/// Combine kamadak's rich EXIF with nom-exif's date + GPS.
+///
+/// nom-exif's tz-correct date wins whenever present; its GPS only fills gaps
+/// kamadak left (so kamadak's coordinates win when it actually parsed them).
+/// When kamadak parsed nothing, a record is still produced if nom-exif found a
+/// date or coordinates — otherwise `None`, so the caller skips the upsert and
+/// the file legitimately falls back to its upload date.
+fn merge_image_metadata(kamadak: Option<ExifMetadata>, nom: NomExif) -> Option<ExifMetadata> {
+    match kamadak {
+        Some(mut m) => {
+            if nom.captured_at.is_some() {
+                m.captured_at = nom.captured_at;
+            }
+            if m.latitude.is_none() {
+                m.latitude = nom.latitude;
+            }
+            if m.longitude.is_none() {
+                m.longitude = nom.longitude;
+            }
+            Some(m)
+        }
+        None => {
+            if nom.captured_at.is_some() || nom.latitude.is_some() || nom.longitude.is_some() {
+                Some(ExifMetadata {
+                    captured_at: nom.captured_at,
+                    latitude: nom.latitude,
+                    longitude: nom.longitude,
+                    ..Default::default()
+                })
+            } else {
+                None
+            }
+        }
+    }
 }
 
 // ─── FileLifecycleHook ───────────────────────────────────────────────────────
@@ -481,5 +529,76 @@ impl FileLifecycleHook for MediaMetadataService {
 
     fn on_file_deleted(&self, _file_id: &str) {
         // storage.file_metadata has ON DELETE CASCADE on file_id — DB handles cleanup.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn dt(year: i32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn recovers_date_and_gps_when_kamadak_fails() {
+        let nom = NomExif {
+            captured_at: Some(dt(2024)),
+            latitude: Some(40.5),
+            longitude: Some(-74.0),
+        };
+        let m = merge_image_metadata(None, nom).expect("metadata when nom found GPS/date");
+        assert_eq!(m.captured_at, Some(dt(2024)));
+        assert_eq!(m.latitude, Some(40.5));
+        assert_eq!(m.longitude, Some(-74.0));
+    }
+
+    #[test]
+    fn fills_only_missing_gps_keeping_kamadak_coords() {
+        let kamadak = ExifMetadata {
+            latitude: Some(1.0),
+            longitude: None,
+            ..Default::default()
+        };
+        let nom = NomExif {
+            latitude: Some(40.5),
+            longitude: Some(-74.0),
+            ..Default::default()
+        };
+        let m = merge_image_metadata(Some(kamadak), nom).unwrap();
+        assert_eq!(m.latitude, Some(1.0)); // kamadak wins where present
+        assert_eq!(m.longitude, Some(-74.0)); // gap filled from nom-exif
+    }
+
+    #[test]
+    fn nom_date_upgrades_kamadak_date_but_keeps_it_when_nom_absent() {
+        let with_nom = merge_image_metadata(
+            Some(ExifMetadata {
+                captured_at: Some(dt(2000)),
+                ..Default::default()
+            }),
+            NomExif {
+                captured_at: Some(dt(2024)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(with_nom.captured_at, Some(dt(2024)));
+
+        let without_nom = merge_image_metadata(
+            Some(ExifMetadata {
+                captured_at: Some(dt(2000)),
+                ..Default::default()
+            }),
+            NomExif::default(),
+        )
+        .unwrap();
+        assert_eq!(without_nom.captured_at, Some(dt(2000)));
+    }
+
+    #[test]
+    fn no_metadata_at_all_yields_none() {
+        assert!(merge_image_metadata(None, NomExif::default()).is_none());
     }
 }
