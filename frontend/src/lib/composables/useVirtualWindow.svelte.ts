@@ -14,10 +14,13 @@ export class VirtualWindow {
 	aboveBy = $state(0);
 	/** Height of the scrollable viewport in px. */
 	viewportH = $state(0);
+	/** Bumped on every resize so consumers can re-measure size-dependent layout. */
+	resizeTick = $state(0);
 
 	#root: HTMLElement | null = null;
 	#scroller: HTMLElement | null = null;
 	#ticking = false;
+	#resizing = false;
 
 	/** Nearest scrollable ancestor, or null to mean the window/document. */
 	#findScroller(el: HTMLElement): HTMLElement | null {
@@ -52,20 +55,30 @@ export class VirtualWindow {
 		});
 	};
 
+	#onResize = (): void => {
+		if (this.#resizing) return;
+		this.#resizing = true;
+		requestAnimationFrame(() => {
+			this.#resizing = false;
+			this.#measure();
+			this.resizeTick++;
+		});
+	};
+
 	/** Begin observing `root`; returns a teardown to call from `onMount`. */
 	observe(root: HTMLElement): () => void {
 		this.#root = root;
 		this.#scroller = this.#findScroller(root);
 		const target: EventTarget = this.#scroller ?? window;
 		target.addEventListener('scroll', this.#onScroll, { passive: true });
-		window.addEventListener('resize', this.#onScroll, { passive: true });
-		const ro = new ResizeObserver(this.#onScroll);
+		window.addEventListener('resize', this.#onResize, { passive: true });
+		const ro = new ResizeObserver(this.#onResize);
 		if (this.#scroller) ro.observe(this.#scroller);
 		ro.observe(root);
 		this.#measure();
 		return () => {
 			target.removeEventListener('scroll', this.#onScroll);
-			window.removeEventListener('resize', this.#onScroll);
+			window.removeEventListener('resize', this.#onResize);
 			ro.disconnect();
 		};
 	}

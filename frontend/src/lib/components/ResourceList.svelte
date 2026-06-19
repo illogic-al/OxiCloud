@@ -59,6 +59,7 @@
 	import { files as filesStore } from '$lib/stores/files.svelte';
 	import { formatBytes } from '$lib/utils/format';
 	import { formatDate, iconNameFromClass } from '$lib/utils/display';
+	import { gridColumns } from '$lib/utils/grid';
 
 	interface Props {
 		title: string;
@@ -148,6 +149,9 @@
 	const viewClass = $derived(
 		filesStore.viewMode === 'grid' ? 'files-grid-view' : 'files-list-view'
 	);
+	/** Content width, for computing the grid's column count to match auto-fill. */
+	let gridWidth = $state(0);
+	const gridCols = $derived(gridColumns(gridWidth));
 
 	// Build the list-view column track from the enabled cells.
 	const columns = $derived(
@@ -409,45 +413,35 @@
 		hint={emptyHint}
 	/>
 {:else}
-	<div class="files-container">
-		<div class={viewClass} style="--files-list-columns: {columns}">
-			<div class="list-header">
-				{#if selectable}
-					<div class="select-cell">
-						<input
-							type="checkbox"
-							aria-label={t('common.select_all', 'Select all')}
-							checked={allSelected}
-							onchange={toggleSelectAll}
-						/>
-					</div>
-				{/if}
-				<div>{t('files.col_name', 'Name')}</div>
-				{#if showOwner}<div>{t('files.col_owner', 'Owner')}</div>{/if}
-				{#if showPath}<div>{pathLabel ?? t('files.col_path', 'Location')}</div>{/if}
-				{#if showType}<div>{t('files.col_type', 'Type')}</div>{/if}
-				{#if showSize}<div>{t('files.col_size', 'Size')}</div>{/if}
-				{#if showDate}<div>{dateLabel ?? t('files.col_modified', 'Date')}</div>{/if}
-				{#if onfavorite || actions}<div></div>{/if}
-			</div>
-
-			{#if grouped}
+	<div class="files-container" bind:clientWidth={gridWidth}>
+		{#if grouped}
+			<div class={viewClass} style="--files-list-columns: {columns}">
+				{@render listHeader()}
 				{#each sections as section (section.key)}
 					<div class="rl-swimlane-header" role="rowheader">{section.label}</div>
 					{#each section.rows as entry (entry.id)}
 						{@render row(entry)}
 					{/each}
 				{/each}
-			{:else if filesStore.viewMode === 'list'}
-				<!-- Flat list view: only the visible rows are mounted. The spacer keeps
-				     the full scroll height so the end-of-list sentinel still fires. -->
+			</div>
+		{:else if filesStore.viewMode === 'list'}
+			<!-- Flat list view: only the visible rows are mounted. The spacer keeps the
+			     full scroll height so the end-of-list sentinel still fires. -->
+			<div class="files-list-view" style="--files-list-columns: {columns}">
+				{@render listHeader()}
 				<VirtualList {items} rowHeight={56} key={(e) => e.id} {row} />
-			{:else}
-				{#each items as entry (entry.id)}
-					{@render row(entry)}
-				{/each}
-			{/if}
-		</div>
+			</div>
+		{:else}
+			<!-- Grid view: the windowed list's inner element IS the card grid. -->
+			<VirtualList
+				{items}
+				columns={gridCols}
+				rowHeight={240}
+				windowClass="files-grid-view"
+				key={(e) => e.id}
+				{row}
+			/>
+		{/if}
 
 		{#if hasMore}
 			<button class="btn btn-secondary rl-more" onclick={onloadmore} disabled={loading}>
@@ -458,6 +452,28 @@
 		<div bind:this={sentinel} class="rl-sentinel" aria-hidden="true"></div>
 	</div>
 {/if}
+
+{#snippet listHeader()}
+	<div class="list-header">
+		{#if selectable}
+			<div class="select-cell">
+				<input
+					type="checkbox"
+					aria-label={t('common.select_all', 'Select all')}
+					checked={allSelected}
+					onchange={toggleSelectAll}
+				/>
+			</div>
+		{/if}
+		<div>{t('files.col_name', 'Name')}</div>
+		{#if showOwner}<div>{t('files.col_owner', 'Owner')}</div>{/if}
+		{#if showPath}<div>{pathLabel ?? t('files.col_path', 'Location')}</div>{/if}
+		{#if showType}<div>{t('files.col_type', 'Type')}</div>{/if}
+		{#if showSize}<div>{t('files.col_size', 'Size')}</div>{/if}
+		{#if showDate}<div>{dateLabel ?? t('files.col_modified', 'Date')}</div>{/if}
+		{#if onfavorite || actions}<div></div>{/if}
+	</div>
+{/snippet}
 
 {#if ctxOpen && ctxEntry && contextActions}
 	<div

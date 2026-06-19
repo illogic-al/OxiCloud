@@ -34,6 +34,7 @@
 	import type { FileItem, FolderItem, ItemType } from '$lib/api/types';
 	import FileViewer from '$lib/components/FileViewer.svelte';
 	import ListToolbar from '$lib/components/ListToolbar.svelte';
+	import VirtualList from '$lib/components/VirtualList.svelte';
 	import MoveDialog from '$lib/components/MoveDialog.svelte';
 	import ShareDialog from '$lib/components/ShareDialog.svelte';
 	import WopiEditor from '$lib/components/WopiEditor.svelte';
@@ -51,6 +52,7 @@
 	} from '$lib/stores/files.svelte';
 	import { formatBytes } from '$lib/utils/format';
 	import { formatDate, iconNameFromClass } from '$lib/utils/display';
+	import { gridColumns } from '$lib/utils/grid';
 
 	// The URL rest param is the trail of folder ids from home's children down.
 	// /files → home root; /files/a/b → folder b inside a inside home.
@@ -798,6 +800,16 @@
 	/** Flat id order matching how rows are displayed (folders then files). */
 	const orderedIds = $derived([...sortedFolders.map((f) => f.id), ...sortedFiles.map((f) => f.id)]);
 
+	// Folders-then-files as one ordered, discriminated list so the (flat) view can
+	// be windowed by a single VirtualList. Content width drives the grid columns.
+	type Entry = { kind: 'folder'; folder: FolderItem } | { kind: 'file'; file: FileItem };
+	const entries = $derived<Entry[]>([
+		...sortedFolders.map((folder) => ({ kind: 'folder' as const, folder })),
+		...sortedFiles.map((file) => ({ kind: 'file' as const, file }))
+	]);
+	const entryKey = (e: Entry): string => (e.kind === 'folder' ? e.folder.id : e.file.id);
+	let gridWidth = $state(0);
+
 	// ── Group-by / swimlanes ─────────────────────────────────────────────────
 	// Mirrors GROUP_BY_DEFS in static/js/app/filesView.js: a flat list ('') plus
 	// Type / Size / Modified date / Created date dimensions. Folders always group
@@ -1088,49 +1100,10 @@
 			hint={t('files.empty_hint', 'Drop files here or use the Upload button to add files.')}
 		/>
 	{:else}
-		<div class="files-container">
-			<div class={viewClass}>
-				<div class="list-header">
-					<div class="list-header-checkbox">
-						<input
-							type="checkbox"
-							aria-label={t('files.select_all', 'Select all')}
-							checked={selectedCount > 0 && selectedCount === totalCount}
-							indeterminate={selectedCount > 0 && selectedCount < totalCount}
-							onchange={toggleSelectAll}
-						/>
-					</div>
-					{#each [{ f: 'name', l: t('files.col_name', 'Name') }, { f: 'owner', l: t('files.col_owner', 'Owner') }, { f: 'type', l: t('files.col_type', 'Type') }, { f: 'size', l: t('files.col_size', 'Size') }, { f: 'modified_at', l: t('files.col_modified', 'Modified') }] as col (col.f)}
-						{#if col.f === 'owner'}
-							<div class="list-header-owner">{col.l}</div>
-						{:else}
-							<button
-								class="list-header-sort"
-								class:is-active={sortField === col.f}
-								data-sort-field={col.f}
-								onclick={() => toggleSort(col.f as SortField)}
-							>
-								{col.l}
-								{#if sortField === col.f}
-									<Icon
-										name={sortDir === 1 ? 'arrow-down' : 'arrow-up'}
-										class="list-header-sort__arrow"
-									/>
-								{/if}
-							</button>
-						{/if}
-					{/each}
-					<div></div>
-				</div>
-
-				{#if groupBy === ''}
-					{#each sortedFolders as folder (folder.id)}
-						{@render folderRow(folder)}
-					{/each}
-					{#each sortedFiles as file (file.id)}
-						{@render fileRow(file)}
-					{/each}
-				{:else}
+		<div class="files-container" bind:clientWidth={gridWidth}>
+			{#if groupBy !== ''}
+				<div class={viewClass}>
+					{@render fileListHeader()}
 					{#each groups as group (group.key)}
 						<div class="resource-list__swimlane-header">{group.label}</div>
 						{#each group.folders as folder (folder.id)}
@@ -1140,11 +1113,70 @@
 							{@render fileRow(file)}
 						{/each}
 					{/each}
-				{/if}
-			</div>
+				</div>
+			{:else if filesStore.viewMode === 'list'}
+				<!-- Flat list: only the rows near the viewport are mounted. -->
+				<div class="files-list-view">
+					{@render fileListHeader()}
+					<VirtualList items={entries} rowHeight={56} key={entryKey} row={entryRow} />
+				</div>
+			{:else}
+				<!-- Grid: the windowed list's inner element IS the card grid. -->
+				<VirtualList
+					items={entries}
+					columns={gridColumns(gridWidth)}
+					rowHeight={240}
+					windowClass="files-grid-view"
+					key={entryKey}
+					row={entryRow}
+				/>
+			{/if}
 		</div>
 	{/if}
 </div>
+
+{#snippet fileListHeader()}
+	<div class="list-header">
+		<div class="list-header-checkbox">
+			<input
+				type="checkbox"
+				aria-label={t('files.select_all', 'Select all')}
+				checked={selectedCount > 0 && selectedCount === totalCount}
+				indeterminate={selectedCount > 0 && selectedCount < totalCount}
+				onchange={toggleSelectAll}
+			/>
+		</div>
+		{#each [{ f: 'name', l: t('files.col_name', 'Name') }, { f: 'owner', l: t('files.col_owner', 'Owner') }, { f: 'type', l: t('files.col_type', 'Type') }, { f: 'size', l: t('files.col_size', 'Size') }, { f: 'modified_at', l: t('files.col_modified', 'Modified') }] as col (col.f)}
+			{#if col.f === 'owner'}
+				<div class="list-header-owner">{col.l}</div>
+			{:else}
+				<button
+					class="list-header-sort"
+					class:is-active={sortField === col.f}
+					data-sort-field={col.f}
+					onclick={() => toggleSort(col.f as SortField)}
+				>
+					{col.l}
+					{#if sortField === col.f}
+						<Icon
+							name={sortDir === 1 ? 'arrow-down' : 'arrow-up'}
+							class="list-header-sort__arrow"
+						/>
+					{/if}
+				</button>
+			{/if}
+		{/each}
+		<div></div>
+	</div>
+{/snippet}
+
+{#snippet entryRow(e: Entry)}
+	{#if e.kind === 'folder'}
+		{@render folderRow(e.folder)}
+	{:else}
+		{@render fileRow(e.file)}
+	{/if}
+{/snippet}
 
 {#snippet folderRow(folder: FolderItem)}
 	<div

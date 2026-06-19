@@ -64,12 +64,17 @@
 	const offsetY = $derived(firstRow * effRowH);
 	const visible = $derived(items.slice(startIndex, endIndex));
 
-	/** Single-column: adopt the real rendered row height once it's known. */
+	/**
+	 * Adopt the real rendered row pitch once rows exist. For a grid (cols > 1) the
+	 * card height tracks the column width (e.g. an aspect-ratio thumbnail), so the
+	 * pitch is the card height plus the grid's row gap, re-measured on resize.
+	 */
 	function refineRowHeight(): void {
-		if (cols !== 1 || !rootEl) return;
-		const firstChild = rootEl.querySelector('.vlist__window > *') as HTMLElement | null;
-		if (!firstChild) return;
-		const h = firstChild.getBoundingClientRect().height;
+		const win = rootEl?.querySelector('.vlist__window') as HTMLElement | null;
+		const firstChild = win?.firstElementChild as HTMLElement | null;
+		if (!win || !firstChild) return;
+		let h = firstChild.getBoundingClientRect().height;
+		if (cols > 1) h += parseFloat(getComputedStyle(win).rowGap) || 0;
 		if (h > 0 && Math.abs(h - measuredRow) > 0.5) measuredRow = h;
 	}
 
@@ -82,9 +87,12 @@
 		return stop;
 	});
 
-	// Refine the measured row height once rows are actually in the DOM.
+	// Re-measure the row pitch when rows first render, columns change, or a resize
+	// reflows the cards (grid card height depends on the column width).
 	$effect(() => {
 		void visible.length;
+		void cols;
+		void vw.resizeTick;
 		refineRowHeight();
 	});
 </script>
