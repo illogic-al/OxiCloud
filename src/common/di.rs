@@ -17,6 +17,7 @@ use crate::application::services::folder_service::FolderService;
 use crate::application::services::i18n_application_service::I18nApplicationService;
 use crate::application::services::nextcloud_file_id_service::NextcloudFileIdService;
 use crate::application::services::nextcloud_login_flow_service::NextcloudLoginFlowService;
+use crate::application::services::people_service::PeopleService;
 use crate::application::services::places_service::PlacesService;
 use crate::application::services::recent_service::RecentService;
 use crate::application::services::search_service::SearchService;
@@ -360,6 +361,9 @@ impl AppServiceFactory {
             fls = fls.with_hook(audio.clone());
         }
         fls = fls.with_hook(media_metadata_service.clone());
+        if self.config.features.enable_faces {
+            fls = fls.with_hook(self.create_face_indexing_service(db_pool));
+        }
         let file_lifecycle = Arc::new(fls);
 
         Ok(CoreServices {
@@ -810,6 +814,34 @@ impl AppServiceFactory {
         service
     }
 
+    /// Creates the face-indexing lifecycle hook (People feature). Uses the
+    /// default no-op analyzer until the operator wires a real ONNX model.
+    pub fn create_face_indexing_service(
+        &self,
+        db_pool: &Arc<PgPool>,
+    ) -> Arc<crate::infrastructure::services::face_indexing_service::FaceIndexingService> {
+        let blob_root = self.storage_path.join(".blobs");
+        let analyzer: Arc<dyn crate::application::ports::face_ports::FaceAnalyzerPort> =
+            Arc::new(crate::infrastructure::services::noop_face_analyzer::NoopFaceAnalyzer);
+        Arc::new(
+            crate::infrastructure::services::face_indexing_service::FaceIndexingService::new(
+                db_pool.clone(),
+                blob_root,
+                analyzer,
+            ),
+        )
+    }
+
+    /// Creates the People (faces) read/clustering service.
+    pub fn create_people_service(&self, db_pool: &Arc<PgPool>) -> Arc<PeopleService> {
+        let repo = Arc::new(
+            crate::infrastructure::repositories::pg::FacePgRepository::new(db_pool.clone()),
+        );
+        let service = Arc::new(PeopleService::new(repo));
+        tracing::info!("People service initialized");
+        service
+    }
+
     /// Preloads translations for every locale in the registry. Build
     /// the registry at startup via `LocaleRegistry::discover` and pass
     /// the resulting list here.
@@ -1018,6 +1050,7 @@ impl AppServiceFactory {
         let favorites_service: Option<Arc<FavoritesService>>;
         let recent_service: Option<Arc<RecentService>>;
         let places_service: Option<Arc<PlacesService>>;
+        let people_service: Option<Arc<PeopleService>>;
         let storage_usage_service: Option<Arc<StorageUsageService>>;
         let mut auth_services: Option<crate::common::di::AuthServices> = None;
         let mut nextcloud_services: Option<NextcloudServices> = None;
@@ -1042,6 +1075,12 @@ impl AppServiceFactory {
 
             places_service = if core.config.features.enable_places {
                 Some(self.create_places_service(&repos.file_read_repository))
+            } else {
+                None
+            };
+
+            people_service = if core.config.features.enable_faces {
+                Some(self.create_people_service(&pool))
             } else {
                 None
             };
@@ -1273,6 +1312,7 @@ impl AppServiceFactory {
             favorites_service,
             recent_service,
             places_service,
+            people_service,
             storage_usage_service,
             calendar_service: None,
             contact_service: None,
@@ -1720,6 +1760,7 @@ pub struct AppState {
     pub favorites_service: Option<Arc<FavoritesService>>,
     pub recent_service: Option<Arc<RecentService>>,
     pub places_service: Option<Arc<PlacesService>>,
+    pub people_service: Option<Arc<PeopleService>>,
     pub storage_usage_service: Option<Arc<StorageUsageService>>,
     pub calendar_service: Option<Arc<CalendarService>>,
     pub contact_service: Option<Arc<ContactStorageAdapter>>,

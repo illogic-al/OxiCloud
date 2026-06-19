@@ -6,6 +6,7 @@ pub mod compression_service;
 pub mod dedup_service;
 pub mod encrypted_blob_backend;
 pub mod exif_service;
+pub mod face_indexing_service;
 pub mod file_content_cache;
 pub mod file_system_i18n_service;
 pub mod image_transcode_service;
