@@ -6,10 +6,13 @@
 	import { page } from '$app/state';
 	import Icon from '$lib/icons/Icon.svelte';
 	import {
+		cacheFolder,
 		createFolder,
 		deleteFolder,
+		fetchFolderListing,
+		getCachedFolder,
 		getFolder,
-		listFolder,
+		invalidateFolderCache,
 		moveFolder,
 		renameFolder,
 		type FolderListing
@@ -133,48 +136,89 @@
 		return metas;
 	}
 
+	// Bumped on every load; a stale in-flight response checks this before it
+	// writes state, so a fast navigation can't be clobbered by an older fetch.
+	let loadSeq = 0;
+
+	function applyListing(data: FolderListing) {
+		listing = data;
+		favoriteIds = new Set(data.favoriteIds);
+		sharedIds = new Set(data.sharedIds);
+	}
+
 	async function load() {
-		loading = true;
 		error = null;
-		// Arm the delayed skeleton; cancel it the moment the load settles so fast
-		// loads never flash placeholders (mirrors filesView.js' 100ms timer).
+		const seq = ++loadSeq;
+
+		// External users have no home folder; send them to shared-with-me.
+		if (session.isExternalUser && pathSegments.length === 0) {
+			await goto('/shared-with-me', { replaceState: true });
+			return;
+		}
+		const home = await session.loadHomeFolder();
+		const folderId = pathSegments.at(-1) ?? home;
+		if (!folderId) {
+			error = t('files.no_home', 'No home folder available.');
+			return;
+		}
+		currentId = folderId;
+		filesStore.currentFolder = folderId;
+
+		// Stale-while-revalidate: paint a previously-visited folder instantly,
+		// then revalidate with If-None-Match (304 = keep what's shown).
+		const cached = getCachedFolder(folderId);
+		if (cached) {
+			applyListing(cached.listing);
+			loading = false;
+			showSkeleton = false;
+		} else {
+			loading = true;
+		}
+		// Delayed skeleton, only when there's nothing cached to show yet.
 		const skeletonTimer = setTimeout(() => {
 			if (loading) showSkeleton = true;
 		}, 100);
+
+		// Breadcrumbs resolve independently so they never block the grid paint.
+		void buildCrumbs(pathSegments).then((trail) => {
+			if (seq === loadSeq) crumbs = trail;
+		});
+
 		try {
-			// External users have no home folder; send them to shared-with-me.
-			if (session.isExternalUser && pathSegments.length === 0) {
-				await goto('/shared-with-me', { replaceState: true });
-				return;
+			const res = await fetchFolderListing(folderId, { etag: cached?.etag });
+			if (seq !== loadSeq) return; // superseded by a newer navigation
+			if (res.status === 200 && res.listing) {
+				applyListing(res.listing);
+				cacheFolder(folderId, res.listing, res.etag);
 			}
-			const home = await session.loadHomeFolder();
-			const folderId = pathSegments.at(-1) ?? home;
-			if (!folderId) {
-				error = t('files.no_home', 'No home folder available.');
-				return;
-			}
-			currentId = folderId;
-			filesStore.currentFolder = folderId;
-			const [data, trail] = await Promise.all([listFolder(folderId), buildCrumbs(pathSegments)]);
-			listing = data;
-			crumbs = trail;
-			favoriteIds = new Set(data.favoriteIds);
-			sharedIds = new Set(data.sharedIds);
+			// 304 → the cached copy already on screen is current.
+			error = null;
 			maybeOpenDeepLink();
 		} catch (e) {
-			// 403 → friendly message rather than the raw "Forbidden" error string.
-			const status = (e as { status?: number })?.status;
-			error =
-				status === 403
-					? t('errors.forbidden', 'Could not load files')
-					: e instanceof Error
-						? e.message
-						: String(e);
+			if (seq !== loadSeq) return;
+			// With a cached view already shown, keep it on a transient failure.
+			if (!cached) {
+				const status = (e as { status?: number })?.status;
+				error =
+					status === 403
+						? t('errors.forbidden', 'Could not load files')
+						: e instanceof Error
+							? e.message
+							: String(e);
+			}
 		} finally {
 			clearTimeout(skeletonTimer);
-			loading = false;
-			showSkeleton = false;
+			if (seq === loadSeq) {
+				loading = false;
+				showSkeleton = false;
+			}
 		}
+	}
+
+	/** Data changed — drop cached listings and reload the current folder fresh. */
+	async function reload() {
+		invalidateFolderCache();
+		await load();
 	}
 
 	/**
@@ -207,7 +251,7 @@
 		if (!name) return;
 		try {
 			await createFolder(name, currentId);
-			await load();
+			await reload();
 		} catch (e) {
 			errorToast(e);
 		}
@@ -253,7 +297,7 @@
 						)
 					: t('files.uploaded', 'Upload complete');
 			ui.finishProgress(nid, done, 'success');
-			await load();
+			await reload();
 		} catch (err) {
 			ui.finishProgress(nid, errorMessage(err), 'error');
 		} finally {
@@ -286,7 +330,7 @@
 		try {
 			if (kind === 'file') await renameFile(id, name);
 			else await renameFolder(id, name);
-			await load();
+			await reload();
 		} catch (e) {
 			errorToast(e);
 		}
@@ -303,7 +347,7 @@
 		try {
 			if (kind === 'file') await deleteFile(id);
 			else await deleteFolder(id);
-			await load();
+			await reload();
 		} catch (e) {
 			errorToast(e);
 		}
@@ -522,7 +566,7 @@
 			}
 		}
 		clearSelection();
-		await load();
+		await reload();
 	}
 
 	// ── Drag-to-move ─────────────────────────────────────────────────────────
@@ -561,7 +605,7 @@
 				else await moveFolder(it.id, targetFolderId);
 			}
 			clearSelection();
-			await load();
+			await reload();
 		} catch (err) {
 			errorToast(err);
 		}
@@ -738,7 +782,7 @@
 				await uploadFile(dirId, file);
 			}
 			ui.notify(t('files.uploaded', 'Upload complete'), 'success');
-			await load();
+			await reload();
 		} catch (err) {
 			errorToast(err);
 		} finally {
@@ -1418,7 +1462,7 @@
 	mode={moveMode}
 	onmoved={() => {
 		clearSelection();
-		void load();
+		void reload();
 	}}
 />
 <ShareDialog
