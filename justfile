@@ -41,6 +41,7 @@ test-integration:
     DATABASE_URL='postgres://oxicloud_test:oxicloud_test@localhost:5433/oxicloud_test' \
       RUSTFLAGS='--cfg integration_tests' \
       cargo test --workspace --tests
+    bash tests/common/stop-db.sh
 
 test-one name:
     cargo test {{name}}
