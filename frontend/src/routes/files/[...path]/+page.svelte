@@ -310,9 +310,59 @@
 	async function onDrop(e: DragEvent) {
 		e.preventDefault();
 		dragOver = false;
-		const dropped = e.dataTransfer?.files;
-		if (!dropped?.length) return;
-		await uploadBatch(Array.from(dropped));
+		const dt = e.dataTransfer;
+		if (!dt) return;
+		// A dropped folder isn't expanded into `.files`, so walk the dropped entry
+		// tree (webkitGetAsEntry) when one is present and recreate it server-side;
+		// otherwise fall back to the flat file list.
+		const tree = await collectDroppedEntries(dt);
+		if (tree) await uploadTree(tree);
+		else if (dt.files?.length) await uploadBatch(Array.from(dt.files));
+	}
+
+	/**
+	 * Expand dropped OS entries into `{file, relativePath}` rows, walking any
+	 * directory tree via the (non-standard but ubiquitous) `webkitGetAsEntry` /
+	 * `createReader` API. Returns `null` when nothing dropped was a directory, so
+	 * the caller takes the simpler flat-`FileList` path.
+	 */
+	async function collectDroppedEntries(
+		dt: DataTransfer
+	): Promise<{ file: File; relativePath: string }[] | null> {
+		// `webkitGetAsEntry()` must be read synchronously while the event is live.
+		const roots: FileSystemEntry[] = [];
+		let sawDir = false;
+		for (const item of Array.from(dt.items)) {
+			const entry = item.webkitGetAsEntry();
+			if (entry) {
+				roots.push(entry);
+				if (entry.isDirectory) sawDir = true;
+			}
+		}
+		if (!sawDir) return null;
+
+		const out: { file: File; relativePath: string }[] = [];
+		async function walk(entry: FileSystemEntry, prefix: string): Promise<void> {
+			if (entry.isFile) {
+				const file = await new Promise<File>((resolve, reject) =>
+					(entry as FileSystemFileEntry).file(resolve, reject)
+				);
+				out.push({ file, relativePath: prefix + entry.name });
+			} else if (entry.isDirectory) {
+				const reader = (entry as FileSystemDirectoryEntry).createReader();
+				const dirPrefix = `${prefix}${entry.name}/`;
+				// readEntries yields in batches; loop until it returns an empty one.
+				for (;;) {
+					const batch = await new Promise<FileSystemEntry[]>((resolve, reject) =>
+						reader.readEntries(resolve, reject)
+					);
+					if (batch.length === 0) break;
+					for (const child of batch) await walk(child, dirPrefix);
+				}
+			}
+		}
+		for (const root of roots) await walk(root, '');
+		return out;
 	}
 
 	async function renameItem(kind: 'file' | 'folder', id: string, current: string) {
@@ -464,6 +514,12 @@
 	 * folders are included (the old per-item loop silently skipped them). A lone
 	 * file still streams directly so it keeps its original name/extension.
 	 */
+	/** Name for a server-zipped multi-item archive (matches the legacy format). */
+	function batchZipName(): string {
+		const stamp = new Date().toISOString().replace('T', ' ').replace(/\..*/, '').replace(/:/g, '-');
+		return `oxicloud ${stamp}.zip`;
+	}
+
 	async function batchDownload() {
 		const fileIds: string[] = [];
 		const folderIds: string[] = [];
@@ -487,8 +543,7 @@
 			return;
 		}
 
-		const stamp = new Date().toISOString().replace('T', ' ').replace(/\..*/, '').replace(/:/g, '-');
-		const zipName = `oxicloud ${stamp}.zip`;
+		const zipName = batchZipName();
 		try {
 			const res = await apiFetch('/api/batch/download', {
 				method: 'POST',
@@ -619,7 +674,36 @@
 		if (e.dataTransfer) {
 			e.dataTransfer.effectAllowed = 'move';
 			if (items.length > 1) showDragGhost(e.dataTransfer, items);
+			// Drag-out-to-OS download: the OS reads `DownloadURL` (a GET URL) and
+			// downloads the dragged item(s) — a single file directly, a folder or a
+			// multi-selection as one server-zipped archive.
+			const dl = dragDownloadDescriptor(items);
+			if (dl) {
+				e.dataTransfer.setData(
+					'DownloadURL',
+					`application/octet-stream:${dl.name}:${location.origin}${dl.url}`
+				);
+			}
 		}
+	}
+
+	/** `{ name, GET url }` for the drag-out download of the current drag set. */
+	function dragDownloadDescriptor(items: ActionTarget[]): { name: string; url: string } | null {
+		if (items.length === 0) return null;
+		if (items.length === 1) {
+			const it = items[0];
+			return it.kind === 'folder'
+				? { name: `${it.name}.zip`, url: folderZipUrl(it.id) }
+				: { name: it.name, url: fileDownloadUrl(it.id) };
+		}
+		// Multi-selection → one archive via the GET twin of POST /api/batch/download
+		// (DownloadURL can only point at a GET URL); file_ids/folder_ids are CSV.
+		const fileIds = items.filter((i) => i.kind === 'file').map((i) => i.id);
+		const folderIds = items.filter((i) => i.kind === 'folder').map((i) => i.id);
+		const params = new URLSearchParams();
+		if (fileIds.length) params.set('file_ids', fileIds.join(','));
+		if (folderIds.length) params.set('folder_ids', folderIds.join(','));
+		return { name: batchZipName(), url: `/api/batch/download?${params.toString()}` };
 	}
 
 	/**
@@ -823,33 +907,29 @@
 	// ── Recursive folder upload ──────────────────────────────────────────────
 	let folderInput = $state<HTMLInputElement | null>(null);
 
-	async function onUploadFolder(e: Event) {
-		const input = e.target as HTMLInputElement;
-		const files = input.files ? Array.from(input.files) : [];
-		if (files.length === 0) return;
+	/**
+	 * Upload files that carry a relative directory path, recreating the folder
+	 * tree under the current folder. Shared by the folder picker and folder drops.
+	 */
+	async function uploadTree(entries: { file: File; relativePath: string }[]) {
+		if (entries.length === 0) return;
 		uploading = true;
 		try {
-			// Map each relative directory path to its created folder id, so files
-			// land in the right place. The root maps to the current folder.
+			// Map each relative directory path to its created folder id; '' = current.
 			const dirIds = new Map<string, string | null>([['', currentId]]);
 
 			async function ensureDir(relDir: string): Promise<string | null> {
 				if (dirIds.has(relDir)) return dirIds.get(relDir) ?? null;
 				const parts = relDir.split('/');
 				const name = parts.pop() as string;
-				const parentRel = parts.join('/');
-				const parentId = await ensureDir(parentRel);
+				const parentId = await ensureDir(parts.join('/'));
 				const created = await createFolder(name, parentId);
 				dirIds.set(relDir, created.id);
 				return created.id;
 			}
 
-			for (const file of files) {
-				// webkitRelativePath: "chosenDir/sub/.../file.ext" — recreate the whole
-				// tree (including the chosen folder) under the current folder.
-				const rel =
-					(file as File & { webkitRelativePath?: string }).webkitRelativePath ?? file.name;
-				const segs = rel.split('/');
+			for (const { file, relativePath } of entries) {
+				const segs = relativePath.split('/');
 				segs.pop(); // drop the filename, keep the directory trail
 				const dirId = await ensureDir(segs.join('/'));
 				await uploadFile(dirId, file);
@@ -860,8 +940,21 @@
 			errorToast(err);
 		} finally {
 			uploading = false;
-			input.value = '';
 		}
+	}
+
+	async function onUploadFolder(e: Event) {
+		const input = e.target as HTMLInputElement;
+		const files = input.files ? Array.from(input.files) : [];
+		// webkitRelativePath: "chosenDir/sub/.../file.ext" — recreate the whole tree.
+		await uploadTree(
+			files.map((file) => ({
+				file,
+				relativePath:
+					(file as File & { webkitRelativePath?: string }).webkitRelativePath ?? file.name
+			}))
+		);
+		input.value = '';
 	}
 
 	const isEmpty = $derived(listing.folders.length === 0 && listing.files.length === 0);
