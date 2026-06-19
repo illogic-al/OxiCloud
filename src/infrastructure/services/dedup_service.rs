@@ -1927,7 +1927,7 @@ impl DedupService {
                               OR b.orphaned_at < now() - ($2::int * interval '1 second'))
                          AND NOT EXISTS (
                              SELECT 1 FROM storage.chunk_manifests m
-                              WHERE m.chunk_hashes @> ARRAY[b.hash]
+                              WHERE m.chunk_hashes @> ARRAY[b.hash::text]
                          )
                          AND NOT EXISTS (
                              SELECT 1 FROM storage.files f
@@ -3394,7 +3394,7 @@ mod delta_upload_integration_tests {
         let pool = test_pool().await;
         let dir = TempDir::new().unwrap();
         let svc = local_svc(&pool, &dir).await;
-        let user = seed_user(&pool).await;
+        let (user, drive_id) = seed_user(&pool).await;
 
         // (A) An aged orphan (orphaned well past the grace window) with no
         //     references → must be collected (row + backing file).
@@ -3433,7 +3433,7 @@ mod delta_upload_integration_tests {
         //     stale ref_count must never delete referenced content.
         let data = content(3 * 1024 * 1024, 71);
         let (file_hash, owned_chunks, file_id) =
-            seed_owned_content(&svc, &pool, user, &data, "gc").await;
+            seed_owned_content(&svc, &pool, user, drive_id, &data, "gc").await;
         let referenced = owned_chunks[0].clone();
         sqlx::query(
             "UPDATE storage.blobs
@@ -3491,12 +3491,12 @@ mod delta_upload_integration_tests {
         let pool = test_pool().await;
         let dir = TempDir::new().unwrap();
         let svc = local_svc(&pool, &dir).await;
-        let user = seed_user(&pool).await;
+        let (user, drive_id) = seed_user(&pool).await;
 
         // Single-owner multi-chunk CDC file → its chunks are uniquely owned.
         let data = content(3 * 1024 * 1024, 91);
         let (file_hash, chunks, file_id) =
-            seed_owned_content(&svc, &pool, user, &data, "deref").await;
+            seed_owned_content(&svc, &pool, user, drive_id, &data, "deref").await;
         assert!(chunks.len() >= 3, "3 MiB must split into ≥3 chunks");
 
         // The delete_file_permanently sequence: drop the file row (PG trigger)
