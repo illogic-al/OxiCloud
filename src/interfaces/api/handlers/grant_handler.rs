@@ -11,8 +11,8 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use futures::future::join_all;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{error, warn};
 use utoipa::IntoParams;
@@ -26,13 +26,10 @@ use crate::application::dtos::grant_dto::{
     SubjectInputDto, UpdateRoleDto, role_from_permissions,
 };
 use crate::application::ports::authorization_ports::AuthorizationEngine;
-use crate::application::ports::file_ports::FileRetrievalUseCase;
-use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::services::recipient_notification_service::NotifyTrigger;
 use crate::common::di::AppState;
 #[allow(unused_imports)]
 use crate::common::errors::DomainError;
-use crate::domain::errors::ErrorKind;
 use crate::domain::services::authorization::{
     GrantCursor, IncomingGrantSummary, OutgoingResourceSummary, Permission, Resource, ResourceKind,
     Role, Subject,
@@ -664,83 +661,64 @@ pub async fn list_shared_with_me(
         .map(|s| s.resource_id.to_string())
         .collect();
 
-    // Resolve resource details concurrently (files and folders in parallel).
-    let (file_results, folder_results) = tokio::join!(
-        join_all(file_ids.iter().map(|id| file_service.get_file(id))),
-        join_all(folder_ids.iter().map(|id| folder_service.get_folder(id)))
+    // Resolve resource details in two batch queries (was one per id via
+    // join_all, which could fan out to ~limit concurrent pooled connections
+    // and starve the primary pool). Missing ids — stale grants whose resource
+    // was deleted before the cascade trigger fired — drop out of the maps.
+    let (file_list, folder_list) = tokio::join!(
+        file_service.get_files_by_ids(&file_ids),
+        folder_service.get_folders_by_ids(&folder_ids)
     );
+    let file_map: HashMap<String, _> = match file_list {
+        Ok(files) => files.into_iter().map(|f| (f.id.clone(), f)).collect(),
+        Err(e) => return AppError::from(e).into_response(),
+    };
+    let folder_map: HashMap<String, _> = match folder_list {
+        Ok(folders) => folders.into_iter().map(|f| (f.id.clone(), f)).collect(),
+        Err(e) => return AppError::from(e).into_response(),
+    };
 
-    // Build the unified item list in original grant order (newest first).
-    // We iterate summaries in order and pick the resolved result from the
-    // appropriate typed bucket.
-    let mut file_idx = 0usize;
-    let mut folder_idx = 0usize;
-
+    // Build the unified item list in original grant order (newest first),
+    // looking each resolved resource up by id.
     let mut items: Vec<SharedWithMeItemDto> = Vec::with_capacity(summaries.len());
 
     for summary in &summaries {
+        let rid = summary.resource_id.to_string();
         match summary.resource_type {
-            ResourceKind::File => {
-                let result = &file_results[file_idx];
-                file_idx += 1;
-                match result {
-                    Ok(file_dto) => {
-                        items.push(SharedWithMeItemDto {
-                            resource_type: ResourceTypeDto::File,
-                            permissions: summary.permissions.iter().map(|p| (*p).into()).collect(),
-                            granted_at: summary.granted_at,
-                            granted_by: summary.granted_by,
-                            resource: ResourceContentDto::File(
-                                file_dto.clone().without_hierarchy_info(),
-                            ),
-                        });
-                    }
-                    Err(e) if e.kind == ErrorKind::NotFound => {
-                        // Stale grant (file deleted, trigger not yet fired) — skip silently.
-                        warn!(
-                            "Skipping stale file grant for resource_id={}: not found",
-                            summary.resource_id
-                        );
-                    }
-                    Err(e) => {
-                        return AppError::internal_error(format!(
-                            "Failed to fetch file {}: {e}",
-                            summary.resource_id
-                        ))
-                        .into_response();
-                    }
+            ResourceKind::File => match file_map.get(&rid) {
+                Some(file_dto) => {
+                    items.push(SharedWithMeItemDto {
+                        resource_type: ResourceTypeDto::File,
+                        permissions: summary.permissions.iter().map(|p| (*p).into()).collect(),
+                        granted_at: summary.granted_at,
+                        granted_by: summary.granted_by,
+                        resource: ResourceContentDto::File(
+                            file_dto.clone().without_hierarchy_info(),
+                        ),
+                    });
                 }
-            }
-            ResourceKind::Folder => {
-                let result = &folder_results[folder_idx];
-                folder_idx += 1;
-                match result {
-                    Ok(folder_dto) => {
-                        items.push(SharedWithMeItemDto {
-                            resource_type: ResourceTypeDto::Folder,
-                            permissions: summary.permissions.iter().map(|p| (*p).into()).collect(),
-                            granted_at: summary.granted_at,
-                            granted_by: summary.granted_by,
-                            resource: ResourceContentDto::Folder(
-                                folder_dto.clone().without_hierarchy_info(),
-                            ),
-                        });
-                    }
-                    Err(e) if e.kind == ErrorKind::NotFound => {
-                        warn!(
-                            "Skipping stale folder grant for resource_id={}: not found",
-                            summary.resource_id
-                        );
-                    }
-                    Err(e) => {
-                        return AppError::internal_error(format!(
-                            "Failed to fetch folder {}: {e}",
-                            summary.resource_id
-                        ))
-                        .into_response();
-                    }
+                None => warn!(
+                    "Skipping stale file grant for resource_id={}: not found",
+                    summary.resource_id
+                ),
+            },
+            ResourceKind::Folder => match folder_map.get(&rid) {
+                Some(folder_dto) => {
+                    items.push(SharedWithMeItemDto {
+                        resource_type: ResourceTypeDto::Folder,
+                        permissions: summary.permissions.iter().map(|p| (*p).into()).collect(),
+                        granted_at: summary.granted_at,
+                        granted_by: summary.granted_by,
+                        resource: ResourceContentDto::Folder(
+                            folder_dto.clone().without_hierarchy_info(),
+                        ),
+                    });
                 }
-            }
+                None => warn!(
+                    "Skipping stale folder grant for resource_id={}: not found",
+                    summary.resource_id
+                ),
+            },
         }
     }
 
@@ -909,13 +887,20 @@ pub async fn list_my_shares(
         .map(|s| s.resource_id.to_string())
         .collect();
 
-    let (file_results, folder_results) = tokio::join!(
-        join_all(file_ids.iter().map(|id| file_service.get_file(id))),
-        join_all(folder_ids.iter().map(|id| folder_service.get_folder(id)))
+    // Two batch queries instead of one get_* per id (see list_shared_with_me).
+    let (file_list, folder_list) = tokio::join!(
+        file_service.get_files_by_ids(&file_ids),
+        folder_service.get_folders_by_ids(&folder_ids)
     );
+    let file_map: HashMap<String, _> = match file_list {
+        Ok(files) => files.into_iter().map(|f| (f.id.clone(), f)).collect(),
+        Err(e) => return AppError::from(e).into_response(),
+    };
+    let folder_map: HashMap<String, _> = match folder_list {
+        Ok(folders) => folders.into_iter().map(|f| (f.id.clone(), f)).collect(),
+        Err(e) => return AppError::from(e).into_response(),
+    };
 
-    let mut file_idx = 0usize;
-    let mut folder_idx = 0usize;
     let mut items: Vec<OutgoingResourceItemDto> = Vec::with_capacity(summaries.len());
 
     for summary in &summaries {
@@ -935,64 +920,39 @@ pub async fn list_my_shares(
             })
             .collect();
 
+        let rid = summary.resource_id.to_string();
         match summary.resource_type {
-            ResourceKind::File => {
-                let result = &file_results[file_idx];
-                file_idx += 1;
-                match result {
-                    Ok(file_dto) => {
-                        // Caller is the granter — they had share-access to the
-                        // resource, so the containing hierarchy is already known
-                        // to them. Keep `path` (unlike list_shared_with_me).
-                        items.push(OutgoingResourceItemDto {
-                            resource_type: ResourceTypeDto::File,
-                            first_shared_at: summary.first_shared_at,
-                            resource: ResourceContentDto::File(file_dto.clone()),
-                            grants,
-                        });
-                    }
-                    Err(e) if e.kind == ErrorKind::NotFound => {
-                        warn!(
-                            "Skipping stale outgoing file grant for resource_id={}: not found",
-                            summary.resource_id
-                        );
-                    }
-                    Err(e) => {
-                        return AppError::internal_error(format!(
-                            "Failed to fetch file {}: {e}",
-                            summary.resource_id
-                        ))
-                        .into_response();
-                    }
+            ResourceKind::File => match file_map.get(&rid) {
+                Some(file_dto) => {
+                    // Caller is the granter — they had share-access to the
+                    // resource, so the containing hierarchy is already known
+                    // to them. Keep `path` (unlike list_shared_with_me).
+                    items.push(OutgoingResourceItemDto {
+                        resource_type: ResourceTypeDto::File,
+                        first_shared_at: summary.first_shared_at,
+                        resource: ResourceContentDto::File(file_dto.clone()),
+                        grants,
+                    });
                 }
-            }
-            ResourceKind::Folder => {
-                let result = &folder_results[folder_idx];
-                folder_idx += 1;
-                match result {
-                    Ok(folder_dto) => {
-                        items.push(OutgoingResourceItemDto {
-                            resource_type: ResourceTypeDto::Folder,
-                            first_shared_at: summary.first_shared_at,
-                            resource: ResourceContentDto::Folder(folder_dto.clone()),
-                            grants,
-                        });
-                    }
-                    Err(e) if e.kind == ErrorKind::NotFound => {
-                        warn!(
-                            "Skipping stale outgoing folder grant for resource_id={}: not found",
-                            summary.resource_id
-                        );
-                    }
-                    Err(e) => {
-                        return AppError::internal_error(format!(
-                            "Failed to fetch folder {}: {e}",
-                            summary.resource_id
-                        ))
-                        .into_response();
-                    }
+                None => warn!(
+                    "Skipping stale outgoing file grant for resource_id={}: not found",
+                    summary.resource_id
+                ),
+            },
+            ResourceKind::Folder => match folder_map.get(&rid) {
+                Some(folder_dto) => {
+                    items.push(OutgoingResourceItemDto {
+                        resource_type: ResourceTypeDto::Folder,
+                        first_shared_at: summary.first_shared_at,
+                        resource: ResourceContentDto::Folder(folder_dto.clone()),
+                        grants,
+                    });
                 }
-            }
+                None => warn!(
+                    "Skipping stale outgoing folder grant for resource_id={}: not found",
+                    summary.resource_id
+                ),
+            },
         }
     }
 

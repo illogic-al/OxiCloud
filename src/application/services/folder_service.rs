@@ -29,6 +29,17 @@ impl FolderService {
         }
     }
 
+    /// Batch counterpart of `get_folder`: resolve many folder ids in ONE
+    /// query instead of one per id. Like `get_folder` it performs no
+    /// per-folder authorization — both current callers (ACL grant listing,
+    /// NextCloud favorites REPORT) resolve ids already vetted by the
+    /// authorization engine or the favorites table. Missing or trashed ids
+    /// are absent from the result; callers re-associate by `id`.
+    pub async fn get_folders_by_ids(&self, ids: &[String]) -> Result<Vec<FolderDto>, DomainError> {
+        let folders = self.folder_storage.get_folders_by_ids(ids).await?;
+        Ok(folders.into_iter().map(FolderDto::from).collect())
+    }
+
     /// Helper: parse a folder id string into a `Resource::Folder`. Returns
     /// `DomainError::not_found` on parse error (anti-enumeration — the same
     /// error as "folder does not exist").

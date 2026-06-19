@@ -109,6 +109,37 @@ impl FolderDbRepository {
         )
         .map_err(|e| DomainError::internal_error("FolderDb", format!("entity: {e}")))
     }
+
+    /// Batch-fetch folders by id — the by-ids counterpart of `get_folder`,
+    /// resolving a page of ACL grants or favorites in ONE query instead of
+    /// one per id. Same `NOT is_trashed` filter and column mapping as
+    /// `get_folder`; missing or trashed ids drop out and callers re-associate
+    /// by id; ordering is not guaranteed.
+    pub async fn get_folders_by_ids(&self, ids: &[String]) -> Result<Vec<Folder>, DomainError> {
+        let uuid_ids: Vec<Uuid> = ids.iter().filter_map(|id| id.parse().ok()).collect();
+        if uuid_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = sqlx::query_as::<_, FolderRow>(
+            r#"
+            SELECT id::text, name, path, parent_id::text, user_id,
+                   EXTRACT(EPOCH FROM created_at)::bigint,
+                   EXTRACT(EPOCH FROM updated_at)::bigint,
+                   EXTRACT(EPOCH FROM tree_modified_at)::bigint
+              FROM storage.folders
+             WHERE id = ANY($1) AND NOT is_trashed
+            "#,
+        )
+        .bind(&uuid_ids)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| DomainError::internal_error("FolderDb", format!("get_folders_by_ids: {e}")))?;
+
+        rows.into_iter()
+            .map(|r| Self::row_to_folder(r.0, r.1, r.2, r.3, Some(r.4), r.5, r.6, r.7))
+            .collect()
+    }
 }
 
 impl FolderRepository for FolderDbRepository {

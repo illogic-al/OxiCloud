@@ -7,7 +7,7 @@ use quick_xml::{
     Reader, Writer,
     events::{BytesEnd, BytesStart, Event},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::application::dtos::display_helpers::{
@@ -17,7 +17,6 @@ use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
 use crate::application::dtos::search_dto::SearchCriteriaDto;
 use crate::application::ports::favorites_ports::FavoritesUseCase;
-use crate::application::ports::file_ports::FileRetrievalUseCase;
 use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::inbound::SearchUseCase;
 use crate::common::di::AppState;
@@ -86,20 +85,47 @@ async fn handle_filter_files(
 
     let home_prefix = format!("My Folder - {}/", user.username);
 
-    // Pass 1: fetch the favorited DTOs (the per-item fetch is a separate
-    // concern from the oc:fileid resolution batched below).
+    // Pass 1: resolve the favorited DTOs in two batch queries (was one
+    // get_* per favorite — up to N serial round-trips on a sync client's
+    // REPORT). Results are looked up by id so the response keeps favorites
+    // order; missing/trashed favorites simply drop out (as before).
+    let mut file_ids: Vec<String> = Vec::new();
+    let mut folder_ids: Vec<String> = Vec::new();
+    for fav in &favorites {
+        match fav.item_type.as_str() {
+            "file" => file_ids.push(fav.item_id.clone()),
+            "folder" => folder_ids.push(fav.item_id.clone()),
+            _ => {}
+        }
+    }
+
+    let file_map: HashMap<String, FileDto> = file_service
+        .get_files_by_ids(&file_ids)
+        .await
+        .map_err(|e| AppError::internal_error(format!("Failed to resolve favorite files: {e}")))?
+        .into_iter()
+        .map(|f| (f.id.clone(), f))
+        .collect();
+    let folder_map: HashMap<String, FolderDto> = folder_service
+        .get_folders_by_ids(&folder_ids)
+        .await
+        .map_err(|e| AppError::internal_error(format!("Failed to resolve favorite folders: {e}")))?
+        .into_iter()
+        .map(|f| (f.id.clone(), f))
+        .collect();
+
     let mut files: Vec<FileDto> = Vec::new();
     let mut folders: Vec<FolderDto> = Vec::new();
     for fav in &favorites {
         match fav.item_type.as_str() {
             "file" => {
-                if let Ok(f) = file_service.get_file(&fav.item_id).await {
-                    files.push(f);
+                if let Some(f) = file_map.get(&fav.item_id) {
+                    files.push(f.clone());
                 }
             }
             "folder" => {
-                if let Ok(f) = folder_service.get_folder(&fav.item_id).await {
-                    folders.push(f);
+                if let Some(f) = folder_map.get(&fav.item_id) {
+                    folders.push(f.clone());
                 }
             }
             _ => {}

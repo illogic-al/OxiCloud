@@ -255,6 +255,52 @@ impl FileBlobReadRepository {
             })
     }
 
+    /// Batch-fetch files by id — the by-ids counterpart of [`get_file`],
+    /// used to resolve a page of ACL grants or favorites in ONE round-trip
+    /// instead of one query per id (the previous `join_all(ids.map(get_file))`
+    /// could fan out to ~200 concurrent pooled connections per page). Applies
+    /// the same `NOT is_trashed` filter and identical column mapping as
+    /// `get_file`. Ids that are missing or trashed simply drop out, so callers
+    /// must re-associate results by id; ordering is not guaranteed.
+    pub async fn get_files_by_ids(&self, ids: &[String]) -> Result<Vec<File>, DomainError> {
+        let uuid_ids: Vec<Uuid> = ids.iter().filter_map(|id| id.parse().ok()).collect();
+        if uuid_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = sqlx::query_as::<_, FileRow>(
+            "SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path, \
+                    fi.size, fi.mime_type, \
+                    EXTRACT(EPOCH FROM fi.created_at)::bigint, \
+                    EXTRACT(EPOCH FROM fi.updated_at)::bigint, \
+                    fi.blob_hash, \
+                    fi.user_id \
+               FROM storage.files fi \
+               LEFT JOIN storage.folders fo ON fo.id = fi.folder_id \
+              WHERE fi.id = ANY($1) AND NOT fi.is_trashed",
+        )
+        .bind(&uuid_ids)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| {
+            DomainError::internal_error("FileBlobRead", format!("get_files_by_ids: {e}"))
+        })?;
+
+        rows.into_iter()
+            .map(
+                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid)| {
+                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid)
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                DomainError::internal_error(
+                    "FileBlobRead",
+                    format!("get_files_by_ids mapping: {e}"),
+                )
+            })
+    }
+
     /// Returns the user_id (owner) for a given file ID.
     /// Mirrors `FolderDbRepository::get_folder_user_id`.
     /// Used by the AuthorizationEngine for owner short-circuit.

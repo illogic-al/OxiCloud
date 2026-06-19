@@ -250,6 +250,17 @@ impl FileRetrievalService {
         let stream = self.file_read.get_file_stream(id).await?;
         Ok((dto, OptimizedFileContent::Stream(Box::into_pin(stream))))
     }
+
+    /// Batch counterpart of [`FileRetrievalUseCase::get_file`]: resolve many
+    /// file ids in ONE query instead of one per id. Like `get_file` it
+    /// performs no per-file authorization — both current callers (ACL grant
+    /// listing, NextCloud favorites REPORT) resolve ids already vetted by the
+    /// authorization engine or the favorites table. Missing or trashed ids are
+    /// absent from the result; callers re-associate by `id`.
+    pub async fn get_files_by_ids(&self, ids: &[String]) -> Result<Vec<FileDto>, DomainError> {
+        let files = self.file_read.get_files_by_ids(ids).await?;
+        Ok(files.into_iter().map(FileDto::from).collect())
+    }
 }
 
 impl FileRetrievalUseCase for FileRetrievalService {
