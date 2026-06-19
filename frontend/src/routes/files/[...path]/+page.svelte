@@ -4,6 +4,7 @@
 	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
+	import { untrack } from 'svelte';
 	import Icon from '$lib/icons/Icon.svelte';
 	import {
 		cacheFolder,
@@ -201,7 +202,6 @@
 			}
 			// 304 → the cached copy already on screen is current.
 			error = null;
-			maybeOpenDeepLink();
 		} catch (e) {
 			if (seq !== loadSeq) return;
 			// With a cached view already shown, keep it on a transient failure.
@@ -227,19 +227,6 @@
 	async function reload() {
 		invalidateFolderCache();
 		await load();
-	}
-
-	/**
-	 * Deep-link auto-open: when the URL carries `?file=<id>` and that file is in
-	 * the freshly loaded listing, open it in the viewer (ported from
-	 * filesView.js' `app.viewFile` handling). Best-effort — a missing/unlisted
-	 * file is silently ignored.
-	 */
-	function maybeOpenDeepLink() {
-		const fileId = page.url.searchParams.get('file');
-		if (!fileId) return;
-		const file = listing.files.find((f) => f.id === fileId);
-		if (file) openFile(file);
 	}
 
 	function openFolder(folder: FolderItem) {
@@ -368,9 +355,45 @@
 	let viewerFile = $state<FileItem | null>(null);
 
 	function openFile(file: FileItem) {
-		viewerFile = file;
-		viewerOpen = true;
+		// Drive the viewer from the URL (?file=<id>) so a preview is bookmarkable,
+		// reload-restorable, and Back/Forward open/close it. The effect below
+		// reflects the param into viewerOpen/viewerFile.
+		const url = new URL(page.url);
+		url.searchParams.set('file', file.id);
+		void goto(url, { keepFocus: true, noScroll: true });
 	}
+
+	// ── File-preview deep link (?file=<id>) ──────────────────────────────────
+	// URL → viewer. Runs on navigation, on popstate (Back/Forward), and once the
+	// listing for an initial deep link arrives. `untrack` stops it re-firing on
+	// viewer-state changes, so a user-initiated close can't be re-opened here.
+	$effect(() => {
+		const fileId = page.url.searchParams.get('file');
+		const files = listing.files;
+		untrack(() => {
+			if (!fileId) {
+				if (viewerOpen) viewerOpen = false;
+				return;
+			}
+			if (viewerOpen && viewerFile?.id === fileId) return;
+			const f = files.find((x) => x.id === fileId);
+			if (f) {
+				viewerFile = f;
+				viewerOpen = true;
+			}
+		});
+	});
+
+	// viewer → URL: when closed from within (X / Esc / backdrop), drop the param
+	// (replaceState, so closing doesn't add a history entry).
+	$effect(() => {
+		const hasParam = page.url.searchParams.get('file') !== null;
+		if (!viewerOpen && hasParam) {
+			const url = new URL(page.url);
+			url.searchParams.delete('file');
+			void goto(url, { keepFocus: true, noScroll: true, replaceState: true });
+		}
+	});
 
 	/**
 	 * Whether the server can render a thumbnail preview for this file. Images and
@@ -593,7 +616,46 @@
 		const items: ActionTarget[] =
 			selected.has(id) && selected.size > 1 ? selectionTargets() : [{ id, name, kind }];
 		e.dataTransfer?.setData(DRAG_TYPE, JSON.stringify(items));
-		if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+		if (e.dataTransfer) {
+			e.dataTransfer.effectAllowed = 'move';
+			if (items.length > 1) showDragGhost(e.dataTransfer, items);
+		}
+	}
+
+	/**
+	 * Custom drag image for a multi-item drag: a stack of the first few rows plus
+	 * a count badge (ported from ui.js). Reuses the .drag-preview / .dragged-items
+	 * / .dragged-items-badge styles already in resourceList.css.
+	 */
+	function showDragGhost(dt: DataTransfer, items: ActionTarget[]) {
+		const MAX = 4;
+		const preview = document.createElement('div');
+		preview.className = 'drag-preview';
+
+		const stack = document.createElement('div');
+		stack.className = 'dragged-items';
+		for (const [i, it] of items.slice(0, MAX).entries()) {
+			const row = document.createElement('div');
+			row.className = 'file-item';
+			if (i === MAX - 1 && items.length > MAX) row.classList.add('fading');
+			const icon = document.createElement('div');
+			icon.className = 'file-icon';
+			icon.textContent = it.kind === 'folder' ? '📁' : '📄';
+			const label = document.createElement('div');
+			label.textContent = it.name;
+			row.append(icon, label);
+			stack.appendChild(row);
+		}
+
+		const badge = document.createElement('div');
+		badge.className = 'dragged-items-badge';
+		badge.textContent = String(items.length);
+
+		preview.append(stack, badge);
+		document.body.appendChild(preview);
+		dt.setDragImage(preview, 0, 0);
+		// The browser snapshots the drag image synchronously; drop the node next tick.
+		setTimeout(() => preview.remove(), 0);
 	}
 
 	function dragPayload(e: DragEvent): ActionTarget[] {
