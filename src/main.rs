@@ -49,7 +49,8 @@ use oxicloud::interfaces;
 use common::di::AppServiceFactory;
 use infrastructure::db::create_database_pools;
 use interfaces::{
-    create_api_routes, create_health_routes, create_public_api_routes, web::create_web_routes,
+    create_api_routes, create_health_routes, create_public_api_routes,
+    web::{content_security_policy, create_web_routes},
 };
 
 fn parse_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
@@ -789,28 +790,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     app = app
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("content-security-policy"),
-            // Note: 'unsafe-inline' is required for style-src because the
-            // frontend JavaScript dynamically sets inline styles (e.g.,
-            // element.style.display = 'none'). This is a common pattern
-            // for UI state management and cannot be easily migrated to
-            // external CSS classes without significant refactoring.
-            // frame-src: '*' only matches network schemes, so 'blob:' must be
-            // listed explicitly for inline PDF/document viewers.
-            // media-src: needed for blob: video/audio playback.
-            HeaderValue::from_static(
-                "default-src 'self'; \
-                 script-src 'self'; \
-                 worker-src 'self'; \
-                 style-src 'self' 'unsafe-inline'; \
-                 img-src 'self' data: blob: https:; \
-                 media-src 'self' blob:; \
-                 connect-src 'self'; \
-                 font-src 'self' data:; \
-                 frame-src * blob:; \
-                 frame-ancestors 'none'; \
-                 base-uri 'self'; \
-                 form-action 'self'",
-            ),
+            // Built at startup: script-src is 'self' plus a SHA-256 hash for
+            // every inline <script> in the served HTML, so the policy stays
+            // strict (no 'unsafe-inline' for scripts) while the SvelteKit SPA's
+            // inline bootstrap can still run. The full directive set, and why
+            // style-src/frame-src/media-src look the way they do, live in
+            // interfaces::web::content_security_policy.
+            HeaderValue::from_str(&content_security_policy(&config))
+                .expect("CSP header value contains only ASCII"),
         ))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("x-content-type-options"),
