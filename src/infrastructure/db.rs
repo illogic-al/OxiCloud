@@ -200,6 +200,25 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
 
     match sqlx::migrate!().run(pool).await {
         Ok(()) => Ok(()),
-        Err(e) => Err(DbError(format!("Migration error: {}", e))),
+        Err(e) => Err(DbError(format_error_chain("Migration error", &e))),
     }
+}
+
+/// Format an error and every wrapped `source()` cause on a single line.
+///
+/// sqlx's `MigrateError::Execute` wraps the underlying `sqlx::Error::Database`
+/// which in turn carries the PG `DETAIL` (e.g. `Key (version)=(20260803000000)`
+/// for a duplicate-key on `_sqlx_migrations_pkey`). The default `Display`
+/// only renders the outermost layer, so the operationally-critical hint
+/// gets buried. Walking the chain surfaces it without needing to bump
+/// `RUST_LOG` to debug.
+fn format_error_chain(prefix: &str, e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = format!("{prefix}: {e}");
+    let mut cur = e.source();
+    while let Some(c) = cur {
+        out.push_str(" -> ");
+        out.push_str(&c.to_string());
+        cur = c.source();
+    }
+    out
 }
