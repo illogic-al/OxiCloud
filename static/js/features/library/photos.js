@@ -46,6 +46,8 @@ const photosView = {
     _initialized: false,
     /** @type {PhotoModeEnum} */
     groupMode: 'monthly',
+    /** @type {'square'|'justified'} */
+    layoutMode: 'square',
     /** @type {Map<string, string>} fileId → thumbnail URL (persists across re-renders) */
     _videoThumbCache: new Map(),
     /** @type {Map<string, PhotoGroup>} group label → group record (DOM + data) */
@@ -81,6 +83,7 @@ const photosView = {
         }
         if (!this._initialized) {
             this.groupMode = /** @type {'daily'|'monthly'|'yearly'} */ (localStorage.getItem('oxicloud-photos-group')) || 'monthly';
+            this.layoutMode = /** @type {'square'|'justified'} */ (localStorage.getItem('oxicloud-photos-layout')) || 'square';
             this._initialized = true;
         }
     },
@@ -121,6 +124,17 @@ const photosView = {
         if (this.groupMode === mode) return;
         this.groupMode = mode;
         localStorage.setItem('oxicloud-photos-group', mode);
+        this._renderFull();
+    },
+
+    /**
+     * Switch tile layout (square crop vs justified aspect-preserving rows).
+     * @param {'square'|'justified'} mode
+     */
+    setLayoutMode(mode) {
+        if (this.layoutMode === mode) return;
+        this.layoutMode = mode;
+        localStorage.setItem('oxicloud-photos-layout', mode);
         this._renderFull();
     },
 
@@ -193,6 +207,8 @@ const photosView = {
 
         this._container.classList.remove('photos-group-daily', 'photos-group-monthly', 'photos-group-yearly');
         this._container.classList.add(`photos-group-${this.groupMode}`);
+        this._container.classList.remove('photos-layout-square', 'photos-layout-justified');
+        this._container.classList.add(`photos-layout-${this.layoutMode}`);
 
         if (this.items.length === 0 && this.exhausted) {
             this._renderEmpty();
@@ -249,9 +265,14 @@ const photosView = {
                 const grid = /** @type {HTMLElement|null} */ (existing.section.querySelector('.photos-grid'));
                 if (grid) {
                     if (existing.materialized) {
-                        let tilesHtml = '';
-                        for (const file of files) tilesHtml += this._renderTile(file);
-                        grid.insertAdjacentHTML('beforeend', tilesHtml);
+                        if (this.layoutMode === 'justified') {
+                            // Justified rows must repack against the whole group.
+                            grid.innerHTML = this._renderGroupTiles(existing.files);
+                        } else {
+                            let tilesHtml = '';
+                            for (const file of files) tilesHtml += this._renderTile(file);
+                            grid.insertAdjacentHTML('beforeend', tilesHtml);
+                        }
                         this._setupVideoThumbnails(grid);
                         this._fadeInTiles(grid);
                     } else {
@@ -346,9 +367,7 @@ const photosView = {
         rec.materialized = true;
         const grid = /** @type {HTMLElement|null} */ (section.querySelector('.photos-grid'));
         if (!grid) return;
-        let html = '';
-        for (const file of rec.files) html += this._renderTile(file);
-        grid.innerHTML = html;
+        grid.innerHTML = this._renderGroupTiles(rec.files);
         grid.style.minHeight = '';
         this._setupVideoThumbnails(grid);
         this._fadeInTiles(grid);
@@ -372,8 +391,7 @@ const photosView = {
      * @returns {{cols: number, gap: number, tile: number}}
      */
     _gridMetrics() {
-        const sample = /** @type {HTMLElement|null} */ (this._container?.querySelector('.photos-grid'));
-        const width = sample?.clientWidth || (this._container?.clientWidth || 1200) - 16;
+        const width = this._gridWidth();
         const mobile = window.matchMedia('(max-width: 768px)').matches;
         let min;
         let gap;
@@ -397,6 +415,13 @@ const photosView = {
      * @returns {number}
      */
     _estimateHeight(count) {
+        if (this.layoutMode === 'justified') {
+            const width = this._gridWidth();
+            const target = window.matchMedia('(max-width: 768px)').matches ? 150 : 200;
+            const perRow = Math.max(1, Math.round(width / (target * 1.4)));
+            const rows = Math.max(1, Math.ceil(count / perRow));
+            return Math.round(rows * target + (rows - 1) * 8);
+        }
         const { cols, gap, tile } = this._gridMetrics();
         const rows = Math.max(1, Math.ceil(count / cols));
         return Math.round(rows * tile + (rows - 1) * gap);
@@ -433,13 +458,15 @@ const photosView = {
     /**
      * Generate HTML for a single photo/video tile
      * @param {FileItem} file
+     * @param {string} [sizeStyle] Inline `width:..;height:..` for justified rows.
      */
-    _renderTile(file) {
+    _renderTile(file, sizeStyle) {
         const isVideo = file.mime_type?.startsWith('video/');
         const selected = this.selected.has(file.id) ? ' selected' : '';
         const cachedThumb = isVideo && this._videoThumbCache.has(file.id) ? this._videoThumbCache.get(file.id) : null;
         const thumbUrl = cachedThumb || `/api/files/${file.id}/thumbnail/preview`;
-        let h = `<div class="photo-tile${selected}" data-id="${this._escAttr(file.id)}" data-mime="${this._escAttr(file.mime_type)}" data-name="${this._escAttr(file.name)}" tabindex="0" role="button" aria-label="${this._escAttr(file.name)}">`;
+        const styleAttr = sizeStyle ? ` style="${sizeStyle}"` : '';
+        let h = `<div class="photo-tile${selected}" data-id="${this._escAttr(file.id)}" data-mime="${this._escAttr(file.mime_type)}" data-name="${this._escAttr(file.name)}" tabindex="0" role="button" aria-label="${this._escAttr(file.name)}"${styleAttr}>`;
         h += `<div class="photo-check"><i class="fas fa-check"></i></div>`;
         const srcset = cachedThumb
             ? ''
@@ -448,6 +475,77 @@ const photosView = {
         if (isVideo) h += `<div class="video-badge"><i class="fas fa-play"></i></div>`;
         h += `</div>`;
         return h;
+    },
+
+    /**
+     * Inner HTML for a group's grid in the current layout mode.
+     * @param {FileItem[]} files
+     * @returns {string}
+     */
+    _renderGroupTiles(files) {
+        if (this.layoutMode !== 'justified') {
+            let html = '';
+            for (const file of files) html += this._renderTile(file);
+            return html;
+        }
+        const rows = this._justifiedRows(files, this._gridWidth());
+        let html = '';
+        for (const row of rows) {
+            html += `<div class="photos-jrow" style="height:${row.height}px">`;
+            for (const t of row.tiles) {
+                html += this._renderTile(t.file, `width:${t.w}px;height:${t.h}px`);
+            }
+            html += '</div>';
+        }
+        return html;
+    },
+
+    /**
+     * Pack files into justified rows (Flickr-style): each full row is scaled so
+     * it fills the container width while preserving every tile's aspect ratio.
+     * Missing dimensions fall back to a 1:1 aspect.
+     * @param {FileItem[]} files
+     * @param {number} width Available content width in px.
+     * @returns {Array<{height: number, tiles: Array<{file: FileItem, w: number, h: number}>}>}
+     */
+    _justifiedRows(files, width) {
+        const gap = 8;
+        const target = window.matchMedia('(max-width: 768px)').matches ? 150 : 200;
+        /** @type {Array<{height: number, tiles: Array<{file: FileItem, w: number, h: number}>}>} */
+        const rows = [];
+        /** @type {Array<{file: FileItem, aspect: number}>} */
+        let cur = [];
+        let aspectSum = 0;
+        for (const file of files) {
+            let aspect = file.width && file.height ? file.width / file.height : 1;
+            if (!Number.isFinite(aspect) || aspect <= 0) aspect = 1;
+            aspect = Math.min(Math.max(aspect, 0.4), 3);
+            cur.push({ file, aspect });
+            aspectSum += aspect;
+            const rowWidth = aspectSum * target + (cur.length - 1) * gap;
+            if (rowWidth >= width) {
+                const h = (width - (cur.length - 1) * gap) / aspectSum;
+                rows.push({
+                    height: Math.round(h),
+                    tiles: cur.map((t) => ({ file: t.file, w: Math.max(1, Math.round(t.aspect * h)), h: Math.round(h) }))
+                });
+                cur = [];
+                aspectSum = 0;
+            }
+        }
+        if (cur.length) {
+            rows.push({
+                height: target,
+                tiles: cur.map((t) => ({ file: t.file, w: Math.max(1, Math.round(t.aspect * target)), h: target }))
+            });
+        }
+        return rows;
+    },
+
+    /** Current grid content width in px (for layout / height estimates). */
+    _gridWidth() {
+        const sample = /** @type {HTMLElement|null} */ (this._container?.querySelector('.photos-grid'));
+        return sample?.clientWidth || (this._container?.clientWidth || 1200) - 16;
     },
 
     /**
@@ -532,7 +630,16 @@ const photosView = {
             ['monthly', i18n.t('photos.view_monthly')],
             ['yearly', i18n.t('photos.view_yearly')]
         ];
-        let html = '<div class="photos-toolbar"><div class="view-toggle">';
+        let html = '<div class="photos-toolbar">';
+
+        // Layout toggle (square crop ↔ justified rows)
+        html += '<div class="view-toggle photos-layout-toggle">';
+        html += `<button class="toggle-btn${this.layoutMode === 'square' ? ' active' : ''}" data-layout-mode="square" title="${this._escAttr(i18n.t('photos.layout_square'))}" aria-label="${this._escAttr(i18n.t('photos.layout_square'))}"><i class="fas fa-table-cells"></i></button>`;
+        html += `<button class="toggle-btn${this.layoutMode === 'justified' ? ' active' : ''}" data-layout-mode="justified" title="${this._escAttr(i18n.t('photos.layout_justified'))}" aria-label="${this._escAttr(i18n.t('photos.layout_justified'))}"><i class="fas fa-grip"></i></button>`;
+        html += '</div>';
+
+        // Grouping toggle (day / month / year)
+        html += '<div class="view-toggle">';
         for (const [mode, label] of modes) {
             const active = this.groupMode === mode ? ' active' : '';
             html += `<button class="toggle-btn${active}" data-group-mode="${mode}">${this._escHtml(label)}</button>`;
@@ -593,6 +700,12 @@ const photosView = {
         const modeBtn = /** @type {HTMLButtonElement} */ (target.closest('[data-group-mode]'));
         if (modeBtn) {
             this.setGroupMode(/** @type {PhotoModeEnum} */ (modeBtn.dataset.groupMode));
+            return;
+        }
+
+        const layoutBtn = /** @type {HTMLButtonElement} */ (target.closest('[data-layout-mode]'));
+        if (layoutBtn) {
+            this.setLayoutMode(/** @type {'square'|'justified'} */ (layoutBtn.dataset.layoutMode));
             return;
         }
 

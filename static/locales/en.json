@@ -71,7 +71,9 @@
         "view_yearly": "Year",
         "delete_title": "Move to Trash",
         "delete_selected_confirm": "Move the selected items to Trash?",
-        "delete_one_confirm": "Move \"{{name}}\" to Trash?"
+        "delete_one_confirm": "Move \"{{name}}\" to Trash?",
+        "layout_square": "Grid",
+        "layout_justified": "Justified"
     },
     "music": {
         "create_playlist": "Create Playlist",

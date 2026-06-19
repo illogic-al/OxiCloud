@@ -19,6 +19,7 @@
     display: flex;
     align-items: center;
     justify-content: flex-end;
+    gap: var(--space-3);
     padding: var(--space-2) var(--space-2) var(--space-1);
 }
 
@@ -52,6 +53,25 @@
     gap: var(--space-3);
     padding: 0 var(--space-2);
     margin-bottom: var(--space-4);
+}
+
+/* Justified (aspect-preserving) layout — the grid becomes a column of rows;
+   tile sizes are set inline by photos.js (see _justifiedRows). */
+.photos-layout-justified .photos-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.photos-jrow {
+    display: flex;
+    flex-direction: row;
+    gap: var(--space-2);
+}
+
+.photos-layout-justified .photo-tile {
+    aspect-ratio: auto;
+    flex: 0 0 auto;
 }
 
 /* Monthly mode — larger tiles, more breathing room */
