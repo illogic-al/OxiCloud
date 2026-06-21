@@ -62,11 +62,9 @@ use crate::interfaces::api::handlers::file_handler::{
     create_file_by_hash, delete_file, download_file, get_file_metadata, get_thumbnail,
     list_files_query, move_file_simple, rename_file, upload_file_with_thumbnails, upload_thumbnail,
 };
-#[allow(deprecated)]
 use crate::interfaces::api::handlers::folder_handler::{
     create_folder, delete_folder_with_trash, download_folder_zip, get_folder,
-    list_folder_resources, list_root_folders, list_root_folders_paginated, move_folder,
-    rename_folder,
+    list_folder_resources, list_root_folders, move_folder, rename_folder,
 };
 use crate::interfaces::api::handlers::i18n_handler::{
     get_locales, get_translations_by_locale, translate,
@@ -160,9 +158,6 @@ pub fn create_public_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppStat
 /// These routes require authentication when auth is enabled.
 /// Receives the fully-assembled `AppState` and extracts all needed services
 /// from it, avoiding a long parameter list.
-// Legacy folder endpoints (contents, listing) are kept for backward-compat;
-// they are marked #[deprecated] so the OpenAPI spec shows them as deprecated.
-#[allow(deprecated)]
 pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     // Extract services from the pre-built AppState
     let folder_service = app_state.applications.folder_service_concrete.clone();
@@ -196,7 +191,6 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     let folders_basic_router = Router::new()
         .route("/", post(create_folder))
         .route("/", get(list_root_folders))
-        .route("/paginated", get(list_root_folders_paginated))
         .route("/{id}", get(get_folder))
         .route("/{id}/resources", get(list_folder_resources))
         .route("/{id}/rename", put(rename_folder))
@@ -383,12 +377,11 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     // All handlers are free functions — see dedup_handler.rs for why
     // #[utoipa::path] cannot be applied to DedupHandler impl methods directly.
     use super::handlers::dedup_handler::{
-        check_hash, check_hashes_batch, get_blob, get_stats, recalculate_stats, upload_with_dedup,
+        check_hash, check_hashes_batch, get_blob, get_stats, recalculate_stats,
     };
     let dedup_router = Router::new()
         .route("/check/{hash}", get(check_hash))
         .route("/check-batch", post(check_hashes_batch))
-        .route("/upload", post(upload_with_dedup))
         .route("/stats", get(get_stats))
         .route("/blob/{hash}", get(get_blob))
         // NOTE: remove_reference is intentionally NOT exposed as a public
@@ -447,7 +440,6 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
             .route("/faces/{file_id}", get(people_handler::faces_for_file))
             .route("/{id}", patch(people_handler::rename_person))
             .route("/{id}/photos", get(people_handler::person_photos))
-            .route("/{id}/hide", post(people_handler::hide_person))
             .with_state(app_state.clone());
 
         router = router.nest("/people", people_router);

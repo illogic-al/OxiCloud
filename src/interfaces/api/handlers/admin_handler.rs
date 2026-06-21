@@ -49,7 +49,6 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
             "/settings/storage/generate-key",
             post(generate_encryption_key),
         )
-        .route("/settings/general", get(get_general_settings))
         // Dashboard / stats
         .route("/dashboard", get(get_dashboard_stats))
         // User management
@@ -62,7 +61,6 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         .route("/users/{id}/quota", put(update_user_quota))
         .route("/users/{id}/password", put(reset_user_password))
         // Registration control
-        .route("/settings/registration", get(get_registration_setting))
         .route("/settings/registration", put(set_registration_setting))
         // Audio metadata
         .route("/audio/metadata/reextract", post(reextract_audio_metadata))
@@ -625,44 +623,6 @@ fn build_backend_from_config(
     }
 }
 
-/// GET /api/admin/settings/general — system overview (backward compat)
-#[utoipa::path(
-    get,
-    path = "/api/admin/settings/general",
-    responses(
-        (status = 200, description = "General system settings"),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Admin required")
-    ),
-    security(("bearerAuth" = [])),
-    tag = "admin"
-)]
-pub async fn get_general_settings(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
-    let auth = state
-        .auth_service
-        .as_ref()
-        .ok_or_else(|| AppError::internal_error("Auth service not configured"))?;
-
-    let user_count = auth
-        .auth_application_service
-        .count_users_efficient()
-        .await
-        .unwrap_or(0);
-    let oidc_configured = auth.auth_application_service.oidc_enabled();
-
-    Ok(Json(serde_json::json!({
-        "server_version": env!("CARGO_PKG_VERSION"),
-        "auth_enabled": true,
-        "total_users": user_count,
-        "oidc_configured": oidc_configured,
-    })))
-}
-
 // ============================================================================
 // Dashboard / Stats
 // ============================================================================
@@ -1136,36 +1096,6 @@ pub async fn reset_user_password(
 // ============================================================================
 // Registration Control
 // ============================================================================
-
-/// GET /api/admin/settings/registration — check if public registration is enabled
-#[utoipa::path(
-    get,
-    path = "/api/admin/settings/registration",
-    responses(
-        (status = 200, description = "Registration setting"),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Admin required")
-    ),
-    security(("bearerAuth" = [])),
-    tag = "admin"
-)]
-pub async fn get_registration_setting(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
-    let svc = state
-        .admin_settings_service
-        .as_ref()
-        .ok_or_else(|| AppError::internal_error("Admin settings service not available"))?;
-
-    let val = svc.get_registration_enabled().await;
-
-    Ok(Json(serde_json::json!({
-        "registration_enabled": val,
-    })))
-}
 
 /// PUT /api/admin/settings/registration — enable/disable public registration
 #[utoipa::path(

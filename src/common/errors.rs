@@ -9,9 +9,6 @@
 // Re-export domain errors for compatibility
 pub use crate::domain::errors::{DomainError, ErrorKind, Result};
 
-// Re-export AppError from interfaces for backward compatibility
-// NOTE: The canonical location of AppError is now crate::interfaces::errors
-
 // Infrastructure error conversions have been moved to:
 // crate::infrastructure::adapters::error_adapters
 //

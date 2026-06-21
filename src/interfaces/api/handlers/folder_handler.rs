@@ -17,7 +17,6 @@ use crate::application::dtos::folder_dto::{
     ListResourcesOptions, MoveFolderDto, RenameFolderDto,
 };
 use crate::application::dtos::grant_dto::{ResourceContentDto, ResourceTypeDto};
-use crate::application::dtos::pagination::PaginationRequestDto;
 use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::application::services::folder_service::FolderService;
@@ -103,16 +102,6 @@ impl FolderHandler {
     pub(super) async fn list_root_folders_impl(
         State(service): State<AppState>,
         auth_user: AuthUser,
-    ) -> axum::response::Response {
-        Self::list_folders_scoped(service, None, &auth_user).await
-    }
-
-    /// Lists root folders with pagination.
-    /// Scoped to the authenticated user — only returns folders owned by this user.
-    pub(super) async fn list_root_folders_paginated_impl(
-        State(service): State<AppState>,
-        auth_user: AuthUser,
-        _pagination: Query<PaginationRequestDto>,
     ) -> axum::response::Response {
         Self::list_folders_scoped(service, None, &auth_user).await
     }
@@ -376,24 +365,6 @@ pub async fn list_root_folders(
     auth_user: AuthUser,
 ) -> axum::response::Response {
     FolderHandler::list_root_folders_impl(state, auth_user).await
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/folders/paginated",
-    params(PaginationRequestDto),
-    responses(
-        (status = 200, description = "Paginated list of root folders"),
-    ),
-    security(("bearerAuth" = [])),
-    tag = "folders"
-)]
-pub async fn list_root_folders_paginated(
-    state: State<AppState>,
-    auth_user: AuthUser,
-    pagination: Query<PaginationRequestDto>,
-) -> axum::response::Response {
-    FolderHandler::list_root_folders_paginated_impl(state, auth_user, pagination).await
 }
 
 #[utoipa::path(

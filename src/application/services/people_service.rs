@@ -243,17 +243,6 @@ impl PeopleService {
         self.repo.rename_person(caller_id, person_id, name).await
     }
 
-    pub async fn set_hidden(
-        &self,
-        caller_id: Uuid,
-        person_id: Uuid,
-        hidden: bool,
-    ) -> Result<(), DomainError> {
-        self.repo
-            .set_person_hidden(caller_id, person_id, hidden)
-            .await
-    }
-
     /// Merge `from` into `into` by reassigning all of `from`'s faces. The
     /// now-empty `from` person is hidden by `list_people`.
     pub async fn merge(&self, caller_id: Uuid, into: Uuid, from: Uuid) -> Result<(), DomainError> {

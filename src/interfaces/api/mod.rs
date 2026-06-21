@@ -56,9 +56,7 @@ use crate::interfaces::api::handlers::contacts_handler::{
     AddMemberRequest, AddressBookResponse, CreateAddressBookRequest, CreateContactRequest,
     GroupNameRequest, UpdateAddressBookRequest, UpdateContactRequest,
 };
-use crate::interfaces::api::handlers::dedup_handler::{
-    DedupUploadResponse, HashCheckResponse, StatsResponse,
-};
+use crate::interfaces::api::handlers::dedup_handler::{HashCheckResponse, StatsResponse};
 use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
 
 #[derive(OpenApi)]
@@ -98,7 +96,6 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::folder_handler::create_folder,
         handlers::folder_handler::get_folder,
         handlers::folder_handler::list_root_folders,
-        handlers::folder_handler::list_root_folders_paginated,
         handlers::folder_handler::list_folder_resources,
         handlers::folder_handler::rename_folder,
         handlers::folder_handler::move_folder,
@@ -122,7 +119,6 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::chunked_upload_handler::cancel_upload,
         // Dedup handlers — all free functions for the same utoipa reason as chunked uploads.
         handlers::dedup_handler::check_hash,
-        handlers::dedup_handler::upload_with_dedup,
         handlers::dedup_handler::get_stats,
         handlers::dedup_handler::get_blob,
         handlers::dedup_handler::recalculate_stats,
@@ -217,9 +213,7 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::admin_handler::update_user_active,
         handlers::admin_handler::update_user_quota,
         handlers::admin_handler::reset_user_password,
-        handlers::admin_handler::get_registration_setting,
         handlers::admin_handler::set_registration_setting,
-        handlers::admin_handler::get_general_settings,
         handlers::admin_handler::get_oidc_settings,
         handlers::admin_handler::save_oidc_settings,
         handlers::admin_handler::get_storage_settings,
@@ -328,7 +322,6 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
             UploadStatusResponseDto,
             // Dedup schemas
             HashCheckResponse,
-            DedupUploadResponse,
             StatsResponse,
             // Contacts / address-book schemas
             AddressBookResponse,

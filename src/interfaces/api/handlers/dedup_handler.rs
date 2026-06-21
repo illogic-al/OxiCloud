@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Json, Multipart, Path, State},
+    extract::{Json, Path, State},
     http::{Response, StatusCode, header},
     response::IntoResponse,
 };
@@ -9,7 +9,6 @@ use utoipa::ToSchema;
 
 use crate::common::di::AppState;
 use crate::interfaces::middleware::auth::AuthUser;
-use crate::interfaces::upload_ingest;
 use std::sync::Arc;
 
 /// Global application state for dependency injection
@@ -55,21 +54,6 @@ pub struct HashBatchRequest {
 pub struct HashBatchResponse {
     /// The subset of the submitted `hashes` the authenticated user already owns.
     pub owned: Vec<String>,
-}
-
-/// Response for upload with dedup endpoint
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DedupUploadResponse {
-    /// Whether this was a new file or an existing one
-    pub is_new: bool,
-    /// The BLAKE3 hash of the content
-    pub hash: String,
-    /// The size of the content in bytes
-    pub size: u64,
-    /// Bytes saved by deduplication (0 if new file)
-    pub bytes_saved: u64,
-    /// Current reference count for this blob
-    pub ref_count: u32,
 }
 
 /// Response for dedup stats endpoint
@@ -218,101 +202,6 @@ impl DedupHandler {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
                 serde_json::to_string(&HashBatchResponse { owned }).unwrap(),
-            ))
-            .unwrap()
-            .into_response()
-    }
-
-    /// Upload content with automatic deduplication (streaming).
-    ///
-    /// Streams the multipart field straight into the CDC chunk store —
-    /// chunking, BLAKE3 hashing and dedup checks happen while the bytes
-    /// arrive (no temp file, no re-read; peak RAM is bounded regardless
-    /// of file size).
-    ///
-    /// POST /api/dedup/upload
-    pub(super) async fn upload_with_dedup_impl(
-        State(state): State<GlobalState>,
-        _auth_user: AuthUser,
-        mut multipart: Multipart,
-    ) -> impl IntoResponse {
-        let dedup = &state.core.dedup_service;
-
-        // Process multipart form
-        while let Some(field) = multipart.next_field().await.unwrap_or(None) {
-            let name = field.name().unwrap_or("").to_string();
-
-            if name == "file" {
-                let content_type = field
-                    .content_type()
-                    .unwrap_or("application/octet-stream")
-                    .to_string();
-                let filename = field.file_name().unwrap_or("unnamed").to_string();
-
-                // ── Stream into the CDC chunk store ──────────────────
-                let source = upload_ingest::multipart_field_stream(field);
-                let ingested = match upload_ingest::ingest_stream_to_cas(
-                    source,
-                    dedup,
-                    &filename,
-                    &content_type,
-                    usize::MAX,
-                    None,
-                )
-                .await
-                {
-                    Ok(ingested) => ingested,
-                    Err(e) => {
-                        tracing::warn!("Dedup upload ingest failed: {}", e.message);
-                        return e.into_response();
-                    }
-                };
-
-                if ingested.size == 0 {
-                    upload_ingest::discard_ingested(dedup, &ingested).await;
-                    return Response::builder()
-                        .status(StatusCode::BAD_REQUEST)
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(r#"{"error": "Empty file not allowed"}"#))
-                        .unwrap()
-                        .into_response();
-                }
-
-                let metadata = dedup.get_blob_metadata(&ingested.hash).await;
-
-                let response = DedupUploadResponse {
-                    is_new: ingested.is_new_blob,
-                    hash: ingested.hash.clone(),
-                    size: ingested.size,
-                    bytes_saved: ingested.bytes_saved,
-                    ref_count: metadata.map(|m| m.ref_count).unwrap_or(1),
-                };
-
-                tracing::info!(
-                    "🔗 Dedup upload: hash={}, new={}, saved={}",
-                    ingested.hash,
-                    ingested.is_new_blob,
-                    ingested.bytes_saved
-                );
-
-                return Response::builder()
-                    .status(if ingested.is_new_blob {
-                        StatusCode::CREATED
-                    } else {
-                        StatusCode::OK
-                    })
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::to_string(&response).unwrap()))
-                    .unwrap()
-                    .into_response();
-            }
-        }
-
-        Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                r#"{"error": "No file field found in multipart form"}"#,
             ))
             .unwrap()
             .into_response()
@@ -563,27 +452,6 @@ pub async fn check_hashes_batch(
 }
 
 #[utoipa::path(
-    post,
-    path = "/api/dedup/upload",
-    request_body(content_type = "multipart/form-data", description = "Multipart form with a 'file' field"),
-    responses(
-        (status = 201, description = "New blob stored", body = DedupUploadResponse),
-        (status = 200, description = "Blob already existed (dedup hit)", body = DedupUploadResponse),
-        (status = 400, description = "No file field or empty file"),
-        (status = 500, description = "Upload failed"),
-    ),
-    tag = "dedup",
-    security(("bearerAuth" = []))
-)]
-pub async fn upload_with_dedup(
-    state: State<GlobalState>,
-    auth_user: AuthUser,
-    multipart: Multipart,
-) -> impl IntoResponse {
-    DedupHandler::upload_with_dedup_impl(state, auth_user, multipart).await
-}
-
-#[utoipa::path(
     get,
     path = "/api/dedup/stats",
     responses(
@@ -801,45 +669,6 @@ mod tests {
 
         // File is gone after cleanup
         assert!(!tokio::fs::try_exists(&temp_path).await.unwrap_or(true));
-    }
-
-    /// Verify the DedupUploadResponse serializes correctly for new blobs.
-    #[test]
-    fn dedup_upload_response_serialization_new_blob() {
-        let response = DedupUploadResponse {
-            is_new: true,
-            hash: "a".repeat(64),
-            size: 1024,
-            bytes_saved: 0,
-            ref_count: 1,
-        };
-
-        let json = serde_json::to_string(&response).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed["is_new"], true);
-        assert_eq!(parsed["size"], 1024);
-        assert_eq!(parsed["bytes_saved"], 0);
-        assert_eq!(parsed["ref_count"], 1);
-    }
-
-    /// Verify the DedupUploadResponse serializes correctly for dedup hits.
-    #[test]
-    fn dedup_upload_response_serialization_dedup_hit() {
-        let response = DedupUploadResponse {
-            is_new: false,
-            hash: "b".repeat(64),
-            size: 2048,
-            bytes_saved: 2048,
-            ref_count: 3,
-        };
-
-        let json = serde_json::to_string(&response).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed["is_new"], false);
-        assert_eq!(parsed["bytes_saved"], 2048);
-        assert_eq!(parsed["ref_count"], 3);
     }
 
     #[test]

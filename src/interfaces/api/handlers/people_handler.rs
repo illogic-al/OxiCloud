@@ -89,30 +89,6 @@ pub async fn rename_person(
 }
 
 #[derive(Deserialize)]
-pub struct HideBody {
-    pub hidden: bool,
-}
-
-/// POST /api/people/{id}/hide — hide/unhide a person from the grid.
-pub async fn hide_person(
-    State(state): State<Arc<AppState>>,
-    auth_user: AuthUser,
-    Path(id): Path<String>,
-    Json(body): Json<HideBody>,
-) -> Response {
-    let Some(svc) = state.people_service.as_ref() else {
-        return disabled();
-    };
-    let Ok(person_id) = Uuid::parse_str(&id) else {
-        return bad_id();
-    };
-    match svc.set_hidden(auth_user.id, person_id, body.hidden).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => AppError::from(e).into_response(),
-    }
-}
-
-#[derive(Deserialize)]
 pub struct MergeBody {
     pub into: String,
     pub from: String,
