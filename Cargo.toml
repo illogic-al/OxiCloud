@@ -151,6 +151,18 @@ name = "bench_thumbnails_mem"
 path = "examples/bench_thumbnails_mem.rs"
 required-features = ["bench"]
 
+# DB connection-pool tail-latency benchmark (needs the dev Postgres up).
+[[example]]
+name = "bench_db_pool"
+path = "examples/bench_db_pool.rs"
+required-features = ["bench"]
+
+# ACL owner-cache benchmark — owner query vs moka hit (needs the dev Postgres up).
+[[example]]
+name = "bench_owner_cache"
+path = "examples/bench_owner_cache.rs"
+required-features = ["bench"]
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

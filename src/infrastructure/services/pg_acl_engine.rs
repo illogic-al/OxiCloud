@@ -74,6 +74,13 @@ struct QueryCounters {
 /// the cap signals pathological data and is surfaced to operators via audit.
 const MAX_GRANT_ROWS: i64 = 10_000;
 
+/// `owner_cache` bound: entries are tiny (Resource + Uuid). 100k ≈ a few MB.
+const OWNER_CACHE_CAPACITY: u64 = 100_000;
+/// `owner_cache` TTL. A resource's owner is immutable, so the only staleness is
+/// a hard-deleted resource briefly resolving to its former owner — harmless
+/// (see `owner_cache` field doc), hence a generous TTL for a high hit rate.
+const OWNER_CACHE_TTL: Duration = Duration::from_secs(300);
+
 pub struct PgAclEngine {
     pool: Arc<PgPool>,
     folder_repo: Arc<FolderDbRepository>,
@@ -84,6 +91,14 @@ pub struct PgAclEngine {
     /// entries; eviction is LRU + TTL. Stale by up to TTL after a membership
     /// change — acceptable trade-off (see plan, "Cache TTL behaviour").
     user_groups_cache: Cache<Uuid, Arc<HashSet<Uuid>>>,
+    /// Memoise `resource → owner UUID`. The owner column is immutable, so the
+    /// owner-short-circuit (the common case: a user touching their own files)
+    /// no longer issues a PK query on every authorization check — just the first
+    /// per resource within the TTL. **Safe**: this can never grant a non-owner
+    /// access (a different caller's `owner == uid` test fails against the cached
+    /// *real* owner), and a hard-deleted resource that briefly short-circuits as
+    /// owned simply fails later at execution with NotFound.
+    owner_cache: Cache<Resource, Uuid>,
 }
 
 impl PgAclEngine {
@@ -101,6 +116,10 @@ impl PgAclEngine {
             user_groups_cache: Cache::builder()
                 .max_capacity(50_000)
                 .time_to_live(Duration::from_secs(30))
+                .build(),
+            owner_cache: Cache::builder()
+                .max_capacity(OWNER_CACHE_CAPACITY)
+                .time_to_live(OWNER_CACHE_TTL)
                 .build(),
         }
     }
@@ -150,6 +169,10 @@ impl PgAclEngine {
             file_repo: Arc::new(FileBlobReadRepository::new_stub()),
             group_repo: None,
             user_groups_cache: Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(1))
+                .build(),
+            owner_cache: Cache::builder()
                 .max_capacity(1)
                 .time_to_live(Duration::from_secs(1))
                 .build(),
@@ -271,6 +294,23 @@ impl PgAclEngine {
     ) -> Result<(Vec<&'static str>, Vec<Uuid>), DomainError> {
         let counters = QueryCounters::default();
         self.subject_match_set(subject, &counters).await
+    }
+
+    /// Owner lookup with memoisation. Hits the DB only on a cache miss; the
+    /// result is cached because a resource's owner never changes. `NotFound`
+    /// (a hard-deleted / nonexistent resource) is propagated, not cached.
+    async fn owner_of_cached(
+        &self,
+        resource: Resource,
+        counters: &QueryCounters,
+    ) -> Result<Uuid, DomainError> {
+        if let Some(owner) = self.owner_cache.get(&resource).await {
+            return Ok(owner);
+        }
+        counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+        let owner = self.owner_of(resource).await?;
+        self.owner_cache.insert(resource, owner).await;
+        Ok(owner)
     }
 
     /// Returns the owner UUID for any resource type.
@@ -552,8 +592,7 @@ impl PgAclEngine {
         // there's no analogous fast path: the grant lookup below resolves
         // a drive owner via the same query that resolves any drive role.
         if let (Subject::User(uid), Resource::Folder(_) | Resource::File(_)) = (subject, resource) {
-            counters.sql_queries.fetch_add(1, Ordering::Relaxed);
-            match self.owner_of(resource).await {
+            match self.owner_of_cached(resource, counters).await {
                 Ok(owner) if owner == uid => return Ok(true),
                 Ok(_) => { /* not owner — fall through to grants */ }
                 Err(e) if e.kind == crate::common::errors::ErrorKind::NotFound => {
