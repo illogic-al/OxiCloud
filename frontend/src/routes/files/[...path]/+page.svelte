@@ -289,11 +289,12 @@
 		}
 	}
 
-	// Upload at most this many files concurrently. Bounded so one stuck file
-	// blocks only its own lane (the others keep going) without overwhelming the
-	// browser's per-host connection cap, spawning too many delta workers, or
-	// over-contending the server with many large concurrent uploads.
-	const UPLOAD_CONCURRENCY = 3;
+	// Upload at most this many files concurrently. Kept low so we stay well under
+	// the browser's ~6 connections-per-host budget — leaving headroom for the
+	// session-refresh/poll requests and (for genuinely huge files) a delta worker,
+	// which itself opens several connections. Over-subscribing here is what made
+	// small uploads queue until the watchdog cancelled them ("stuck at N%").
+	const UPLOAD_CONCURRENCY = 2;
 
 	/** Outer backstop deadline (ms). The plain-upload path already self-aborts on
 	 *  a stalled connection (see `uploadFileWithProgress`); this only catches a

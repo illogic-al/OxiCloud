@@ -11,8 +11,21 @@ import { getCsrfToken } from '$lib/api/csrf';
 import { createFileByHash, dedupCheckBatch } from '$lib/api/endpoints/files';
 import { blake3HexOfFile } from '$lib/vendor/hashWasm';
 
-/** Files smaller than this skip delta: the round-trips cost more than the bytes. */
+/** Files smaller than this skip delta: the round-trips cost more than the bytes.
+ *  Also the upper bound for client-side whole-file hashing (instant by-hash
+ *  uploads) — we never read a file larger than this fully into memory. */
 export const DELTA_UPLOAD_MIN_SIZE = 8 * 1024 * 1024;
+
+/** Only files at least this large actually run the delta worker. A delta worker
+ *  opens SEVERAL concurrent requests (overlapping `negotiate` batches + chunk
+ *  PUTs); a few running at once exhaust the browser's ~6 connections-per-host
+ *  budget and starve plain uploads (they queue, then the upload watchdog cancels
+ *  them — the "stuck at N%" folder upload). Typical large files (e.g. tens of MB)
+ *  therefore go through a single-connection plain upload; delta is reserved for
+ *  genuinely huge files, where chunked, resumable transfer earns its keep and few
+ *  run concurrently. (Delta's real payoff — sub-file dedup — only helps on
+ *  re-upload anyway, not the first upload that dominates these batches.) */
+const DELTA_WORKER_MIN_SIZE = 64 * 1024 * 1024;
 
 const DELTA_WORKER_URL = '/workers/deltaWorker.js';
 const DELTA_TIMEOUT_BASE_MS = 120_000;
@@ -59,7 +72,7 @@ export function tryDeltaUpload(
 ): Promise<DeltaUploadAnswer | null> {
 	if (
 		!folderId ||
-		file.size < DELTA_UPLOAD_MIN_SIZE ||
+		file.size < DELTA_WORKER_MIN_SIZE ||
 		usable === false ||
 		typeof Worker === 'undefined'
 	) {
