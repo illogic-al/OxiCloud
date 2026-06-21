@@ -168,6 +168,12 @@ name = "bench_db_pool"
 path = "examples/bench_db_pool.rs"
 required-features = ["bench"]
 
+# Blob-manifest read round-trip benchmark: OLD 2 queries vs NEW 1 (needs dev Postgres).
+[[example]]
+name = "bench_blob_manifest"
+path = "examples/bench_blob_manifest.rs"
+required-features = ["bench"]
+
 # ACL owner-cache benchmark — owner query vs moka hit (needs the dev Postgres up).
 [[example]]
 name = "bench_owner_cache"

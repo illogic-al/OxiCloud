@@ -1475,6 +1475,33 @@ impl DedupService {
 
     // ── Read operations ──────────────────────────────────────────
 
+    /// Build an in-order, prefetched byte stream over a CDC file's chunks.
+    ///
+    /// Read-ahead depth is the backend's hint (1 for local disk, higher for
+    /// remote object stores where overlapping fetches hide per-chunk latency).
+    /// Shared by [`Self::read_blob_stream`] and [`Self::read_blob_bytes`] so both
+    /// build the chunk stream identically from a manifest's `chunk_hashes`.
+    fn stream_chunks(
+        &self,
+        chunk_hashes: Vec<String>,
+    ) -> Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> {
+        let prefetch = self.backend.read_prefetch().max(1);
+        let backend = self.backend.clone();
+        let chunk_stream = stream::iter(chunk_hashes)
+            .map(move |chunk_hash| {
+                let backend = backend.clone();
+                async move {
+                    backend
+                        .get_blob_stream(&chunk_hash)
+                        .await
+                        .map_err(|e| std::io::Error::other(e.to_string()))
+                }
+            })
+            .buffered(prefetch)
+            .try_flatten();
+        Box::pin(chunk_stream)
+    }
+
     /// Stream blob content — CDC-aware with legacy fallback.
     ///
     /// For CDC files: looks up the manifest, then streams chunks in order,
@@ -1494,29 +1521,10 @@ impl DedupService {
         .await
         .map_err(|e| DomainError::internal_error("Dedup", format!("Manifest lookup: {}", e)))?;
 
-        if let Some(chunk_hashes) = manifest {
-            // CDC file: stream chunks in order. Read-ahead depth is the
-            // backend's hint (1 for local disk, higher for remote object
-            // stores where overlapping fetches hide per-chunk latency).
-            let prefetch = self.backend.read_prefetch().max(1);
-            let backend = self.backend.clone();
-            let chunk_stream = stream::iter(chunk_hashes)
-                .map(move |chunk_hash| {
-                    let backend = backend.clone();
-                    async move {
-                        backend
-                            .get_blob_stream(&chunk_hash)
-                            .await
-                            .map_err(|e| std::io::Error::other(e.to_string()))
-                    }
-                })
-                .buffered(prefetch)
-                .try_flatten();
-
-            Ok(Box::pin(chunk_stream))
-        } else {
+        match manifest {
+            Some(chunk_hashes) => Ok(self.stream_chunks(chunk_hashes)),
             // Legacy whole-file blob
-            self.backend.get_blob_stream(hash).await
+            None => self.backend.get_blob_stream(hash).await,
         }
     }
 
@@ -1525,11 +1533,33 @@ impl DedupService {
     /// This is intended for image-oriented workflows such as thumbnail
     /// generation where the downstream library already requires the full
     /// payload in memory to decode the image.
+    ///
+    /// A single manifest query fetches BOTH the size hint (for the buffer
+    /// pre-allocation) and the chunk list — they live in the same
+    /// `chunk_manifests` PK row, so reading them separately (the old
+    /// `blob_size` + `read_blob_stream`) doubled the manifest round-trips on
+    /// every full-blob read (e.g. 2N queries for an N-image gallery cold load).
     pub async fn read_blob_bytes(&self, hash: &str) -> Result<Bytes, DomainError> {
-        let expected_size = self.blob_size(hash).await? as usize;
-        let mut data = Vec::with_capacity(expected_size);
-        let mut stream = self.read_blob_stream(hash).await?;
+        let manifest = sqlx::query_as::<_, (Vec<String>, i64)>(
+            "SELECT chunk_hashes, total_size FROM storage.chunk_manifests WHERE file_hash = $1",
+        )
+        .bind(hash)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("Dedup", format!("Manifest lookup: {}", e)))?;
 
+        let (mut stream, expected_size) = match manifest {
+            Some((chunk_hashes, total_size)) => {
+                (self.stream_chunks(chunk_hashes), total_size.max(0) as usize)
+            }
+            None => {
+                // Legacy whole-file blob: size + stream straight from the backend.
+                let size = self.backend.blob_size(hash).await? as usize;
+                (self.backend.get_blob_stream(hash).await?, size)
+            }
+        };
+
+        let mut data = Vec::with_capacity(expected_size);
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| {
                 DomainError::internal_error("Dedup", format!("Failed to read blob chunk: {}", e))
