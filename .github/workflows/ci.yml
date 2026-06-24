@@ -95,6 +95,18 @@ jobs:
     if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
+      # Same scope as the `tests` job below — `--all-targets
+      # --all-features` builds examples + benches across the full
+      # feature matrix and runs into the same disk ceiling. See the
+      # rationale on the `tests` job's free-disk-space step.
+      - uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -192,6 +204,22 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
+      # Free ~26 GB of preinstalled tools the runner image ships with
+      # (Android SDK ~12 GB, Haskell/GHC ~5 GB, .NET ~2 GB, swap +
+      # docker images by the action's defaults). `cargo test
+      # --all-features --workspace` on this repo blows past the
+      # ubuntu-latest ~14 GB free budget otherwise (PR #520 died on
+      # the `bench_owner_cache` example link step with ENOSPC).
+      # `tool-cache: false` is load-bearing — wiping it breaks
+      # `setup-rust`/`setup-node`/etc.
+      - uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -234,6 +262,19 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
+      # `cargo build --release --features plugins` is the heaviest
+      # link step in the workflow — release-profile linking emits
+      # large intermediate objects + plugins drags Wasmtime in.
+      # Preemptive cleanup keeps it well inside the runner disk
+      # budget; same rationale as the tests/clippy jobs above.
+      - uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
